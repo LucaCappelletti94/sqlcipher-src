@@ -696,9 +696,12 @@ static void op_cache_race(struct input *in) {
   memvfs_flip(index, at, mask);
   tamper_flip(file_of_memvfs(index), memvfs_name(index), at, mask);
   if (kind == 0) {
+    const uint8_t *start = in->data;
     struct key key;
     read_key(in, &key);
     apply_key(db, "main", &key, 1, NULL);
+    record(db_file, STEP_KEY, start, in->data);
+    if (key.passphrase) recipes[db_file].passphrase = 1;
   } else if (kind == 1) {
     op_backup(in);
   } else if (!vacuum_blocked(db, known_vacuum("VACUUM", 6))) {
