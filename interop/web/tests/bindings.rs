@@ -1,4 +1,4 @@
-//! The shipped bindings key, rekey and reject through `sqlite3_key` and `sqlite3_rekey`, with no `PRAGMA`.
+//! The generated bindings key, rekey and reject through `sqlite3_key` and `sqlite3_rekey`, with no `PRAGMA`.
 use interop_web::sqlcipher as ffi;
 use sqlite_wasm_rs::vfs::memvfs::MemVfsUtil;
 use sqlite_wasm_rs::vfs::transfer::DbTransfer;
@@ -56,7 +56,7 @@ fn c_len(key: &[u8]) -> i32 {
 }
 
 #[wasm_bindgen_test]
-fn bindings_key_and_rekey_the_shipped_sources() {
+fn bindings_key_and_rekey_the_sources() {
     assert_eq!(unsafe { ffi::sqlite3_initialize() }, ffi::SQLITE_OK);
     let util = unsafe { MemVfsUtil::get() }.unwrap();
     {

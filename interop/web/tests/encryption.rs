@@ -100,7 +100,7 @@ fn sqlcipher_version_and_provider() {
     let p = db.one("PRAGMA cipher_provider").unwrap();
     assert!(
         v.as_deref()
-            .is_some_and(|v| v.starts_with(&format!("{} ", sqlcipher_src::SQLCIPHER_VERSION))),
+            .is_some_and(|v| v.starts_with(&format!("{} ", interop_web::SQLCIPHER_VERSION))),
         "unexpected cipher_version: {v:?}"
     );
     assert_eq!(

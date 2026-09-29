@@ -1,5 +1,6 @@
 #!/bin/sh -e
 # Runs SQLCipher's own test suite against the shipped wrapper, so our libtomcrypt switch set meets SQLCipher's expectations.
+# A leg of tools/leg.sh sets SQLCIPHER_TREE to its SQLCipher tree and SQLCIPHER_DIR to its generated sources.
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -7,6 +8,7 @@ ROOT=$(pwd)
 . "$ROOT/tools/releases.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+SOURCES=${SQLCIPHER_DIR:-$ROOT/sqlcipher}
 
 # sqlcipher-template holds no tests, and sqlcipher-threads races under the shipped SQLITE_MUTEX_NOOP.
 SKIP_FILES="sqlcipher-template sqlcipher-threads"
@@ -24,24 +26,29 @@ if [ -n "${SANITIZE:-}" ]; then
     export ASAN_OPTIONS UBSAN_OPTIONS
 fi
 
-trust_keys "$WORK"
-fetch_sqlcipher "$WORK"
+if [ -n "${SQLCIPHER_TREE:-}" ]; then
+    cp -R "$SQLCIPHER_TREE" "$WORK/sqlcipher"
+else
+    trust_keys "$WORK"
+    fetch_sqlcipher "$WORK"
+fi
 cd "$WORK/sqlcipher"
 # TCL_LIB names the tclConfig.sh directory when configure cannot find it.
 CC="$CC" ./configure ${TCL_LIB:+--with-tcl="$TCL_LIB"} > configure.log
 make sqlite3.c > make.log
 # SQLCipher needs SQLITE_TEMP_STORE=2, which sqlite-wasm-rs sets on its own command line.
-printf '#define SQLITE_TEMP_STORE 2\n#include "%s/sqlcipher/sqlite3.c"\n' "$ROOT" > sqlite3.c
+printf '#define SQLITE_TEMP_STORE 2\n#include "%s/sqlite3.c"\n' "$SOURCES" > sqlite3.c
 # SQLITE_HAS_CODEC stops every file skipping itself, SQLCIPHER_TEST enables the error pragmas, FTS5 is used by export tests.
 make testfixture CC="$CC" CFLAGS="$OPT -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
     LDFLAGS="${SANITIZE:+$OPT}" > testfixture.log 2>&1
 
 nm testfixture | grep -q sqlcipher_wasm_extra_init ||
-    { echo "testfixture was not built from sqlcipher/sqlite3.c" >&2; exit 1; }
+    { echo "testfixture was not built from $SOURCES/sqlite3.c" >&2; exit 1; }
 # A clean sanitizer run only counts if the binary is really instrumented.
 [ -z "${SANITIZE:-}" ] || { nm testfixture | grep -q __asan_report_load && nm testfixture | grep -q __ubsan_handle; } ||
     { echo "testfixture is not instrumented" >&2; exit 1; }
-printf 'sqlite3 db :memory:\ndb eval {PRAGMA key = %s}\nputs "[db eval {PRAGMA cipher_version}] [db eval {PRAGMA cipher_provider}]"\n' "'probe'" > probe.tcl
+# 5.x refuses a key on :memory:, so the probe keys a file.
+printf 'sqlite3 db probe.db\ndb eval {PRAGMA key = %s}\nputs "[db eval {PRAGMA cipher_version}] [db eval {PRAGMA cipher_provider}]"\n' "'probe'" > probe.tcl
 echo "Testing SQLCipher $(./testfixture probe.tcl)"
 
 failed_files=""

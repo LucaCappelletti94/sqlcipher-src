@@ -1,0 +1,169 @@
+---
+name: SQLCipher leg
+
+# One SQLCipher line other than the shipped release, through the same checks, from sources nothing ships.
+"on":
+  workflow_call:
+    inputs:
+      leg:
+        description: next, the signed pre-release pinned in tools/releases.sh, or prerelease or beta, the head of that branch.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  generate:
+    name: Sources generate from SQLCipher ${{ inputs.leg }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get install -y --no-install-recommends tcl "libclang-$(sed -nE 's/^LLVM_MAJOR="(.*)"$/\1/p' tools/releases.sh)-dev"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - run: ./tools/leg.sh "$LEG" "$RUNNER_TEMP/leg"
+        env:
+          LEG: ${{ inputs.leg }}
+      # A tarball keeps the modes configure and make rely on.
+      - run: tar czf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP" leg
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}/leg.tar.gz
+          retention-days: 7
+
+  interop-released:
+    name: Released native SQLCipher and Wasm SQLCipher ${{ inputs.leg }} open each other's files
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}
+      - run: |
+          tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
+          cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: wasm-pack
+      # Native is rusqlite's bundled release, so a newer major crosses with the PRAGMA cipher_compatibility of that release.
+      - run: SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./interop/run.sh
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: "300"
+
+  interop-leg:
+    name: Native and Wasm SQLCipher ${{ inputs.leg }} open each other's files with its defaults
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}
+      - run: |
+          tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
+          cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: wasm-pack
+      - run: SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" NATIVE_SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./interop/run.sh
+        env:
+          WASM_BINDGEN_TEST_TIMEOUT: "300"
+
+  browsers:
+    name: Wasm SQLCipher ${{ inputs.leg }} runs in Chrome and Firefox
+    needs: generate
+    runs-on: ubuntu-latest
+    env:
+      WASM_BINDGEN_USE_BROWSER: "1"
+      WASM_BINDGEN_TEST_TIMEOUT: "300"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}
+      - run: |
+          tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
+          cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
+          echo "SQLITE_WASM_RS_SOURCE_DIR=$RUNNER_TEMP/leg/sources" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: wasm-pack
+      - name: Chrome
+        working-directory: interop/web
+        run: wasm-pack test --headless --chrome --release --test encryption --test broken_crypto --test broken_crypto_plain --test sahpool --test bindings
+      - name: Firefox
+        if: ${{ !cancelled() }}
+        working-directory: interop/web
+        run: wasm-pack test --headless --firefox --release --test encryption --test broken_crypto --test broken_crypto_plain --test sahpool --test bindings
+
+  suite:
+    name: SQLCipher ${{ inputs.leg }}'s own tests pass on its generated sources
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}
+      - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
+      - run: sudo apt-get install -y --no-install-recommends tcl-dev
+      - run: SQLCIPHER_TREE="$RUNNER_TEMP/leg/sqlcipher" SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./suite/run.sh
+
+  sanitizers:
+    name: SQLCipher ${{ inputs.leg }}'s own tests are clean under ASAN and UBSan
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}
+      - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
+      - run: sudo apt-get install -y --no-install-recommends tcl-dev
+      - run: SQLCIPHER_TREE="$RUNNER_TEMP/leg/sqlcipher" SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./suite/run.sh
+        env:
+          SANITIZE: "1"
+
+  rusqlite-native:
+    name: rusqlite's SQLCipher tests pass on SQLCipher ${{ inputs.leg }} natively
+    needs: generate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sqlcipher-${{ inputs.leg }}
+          path: ${{ runner.temp }}
+      - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - run: SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./tools/rusqlite-native.sh
+        env:
+          # 5.x refuses to build with direct overflow reads, which 4.x only uses as a shortcut.
+          LIBSQLITE3_FLAGS: -DSQLITE_DIRECT_OVERFLOW_READ=0

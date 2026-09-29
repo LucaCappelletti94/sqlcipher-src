@@ -10,8 +10,12 @@ name: SQLCipher release
         description: SQLCipher release to generate from, such as 4.19.1. Empty means the latest.
         required: false
         type: string
+      next_version:
+        description: SQLCipher pre-release for CI to test as the next line, such as 5.0.0-rc1. Empty means the latest.
+        required: false
+        type: string
       retry:
-        description: Generate it even if its pull request was closed unmerged.
+        description: Open it even if its pull request was closed unmerged.
         required: false
         type: boolean
         default: false
@@ -27,9 +31,14 @@ concurrency:
 
 jobs:
   generate:
-    name: Generate from a SQLCipher release
+    # release moves the shipped sources, next moves the signed pre-release CI tests beside them.
+    name: Follow the SQLCipher ${{ matrix.line }} pin
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        line: [release, next]
     steps:
       # A manual dispatch may select another ref, and only main's tree belongs here.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -37,49 +46,88 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Pick the release
+      - name: Pick the version
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          REQUESTED: ${{ inputs.version }}
+          LINE: ${{ matrix.line }}
+          REQUESTED: ${{ matrix.line == 'release' && inputs.version || inputs.next_version }}
           RETRY: ${{ inputs.retry }}
         run: |
           set -euo pipefail
-          pinned=$(sed -nE 's/^pub const SQLCIPHER_VERSION: &str = "(.*)";$/\1/p' src/lib.rs)
+          if [ "$LINE" = release ]; then
+            pinned=$(sed -nE 's/^pub const SQLCIPHER_VERSION: &str = "(.*)";$/\1/p' src/lib.rs)
+            prefix="sqlcipher/v"
+          else
+            pinned=$(sed -nE 's/^SQLCIPHER_NEXT_VERSION="(.*)"$/\1/p' tools/releases.sh)
+            prefix="sqlcipher-next/v"
+          fi
           if [ -n "$REQUESTED" ]; then
             target=$REQUESTED
             [ "$target" != "$pinned" ] && moved=yes
-          else
+          elif [ "$LINE" = release ]; then
             target=$(gh release view --repo sqlcipher/sqlcipher --json tagName --jq '.tagName | ltrimstr("v")')
             newest=$(printf '%s\n%s\n' "$pinned" "$target" | sort -V | tail -n 1)
             [ "$target" != "$pinned" ] && [ "$newest" = "$target" ] && moved=yes
+          else
+            # The newest published pre-release, since sort -V orders 5.0.0 before 5.0.0-beta.
+            target=$(gh release list --repo sqlcipher/sqlcipher --limit 30 --json tagName,isPrerelease \
+              --jq '[.[] | select(.isPrerelease)][0].tagName // "" | ltrimstr("v")')
+            [ -n "$target" ] && [ "$target" != "$pinned" ] && moved=yes
           fi
           echo "pinned $pinned, target $target"
           # A pull request closed unmerged is a rejection, which only a retry dispatch overrides.
-          rejected=$(gh pr list --head "sqlcipher/v$target" --state closed --json mergedAt \
+          rejected=$(gh pr list --head "$prefix$target" --state closed --json mergedAt \
             --jq '[.[] | select(.mergedAt == null)] | length')
           if [ "${moved:-}" = yes ] && [ "$rejected" -gt 0 ] && [ "$RETRY" != true ]; then
             echo "SQLCipher $target was rejected by closing its pull request, so it is skipped"
             moved=
           fi
           echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
           [ "${moved:-}" = yes ] && echo "moved=yes" >> "$GITHUB_OUTPUT"
           true
 
-      - if: steps.release.outputs.moved == 'yes'
+      - if: steps.release.outputs.moved == 'yes' && matrix.line == 'release'
         run: sudo apt-get install -y --no-install-recommends tcl "libclang-$(sed -nE 's/^LLVM_MAJOR="(.*)"$/\1/p' tools/releases.sh)-dev"
 
-      - if: steps.release.outputs.moved == 'yes'
+      - if: steps.release.outputs.moved == 'yes' && matrix.line == 'release'
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
 
       - if: steps.release.outputs.moved == 'yes'
+        name: Move the pin
+        id: bump
         env:
+          LINE: ${{ matrix.line }}
           TARGET: ${{ steps.release.outputs.target }}
-        run: ./bump.sh "$TARGET"
+        run: |
+          set -euo pipefail
+          if [ "$LINE" = release ]; then
+            ./bump.sh "$TARGET"
+            sqlite=$(sed -nE 's/^pub const SQLITE_VERSION: &str = "(.*)";$/\1/p' src/lib.rs)
+            {
+              echo "title=Generate from SQLCipher $TARGET on SQLite $sqlite"
+              echo "paths=Cargo.toml Cargo.lock interop/web/Cargo.lock tools/releases.sh src/lib.rs sqlcipher"
+              echo "commit=$(sed -nE 's/^SQLCIPHER_COMMIT="(.*)"$/\1/p' tools/releases.sh)"
+            } >> "$GITHUB_OUTPUT"
+          else
+            # Only an annotated tag is taken, and tools/leg.sh then accepts it only with a valid signature from the pinned key.
+            commit=$(git ls-remote https://github.com/sqlcipher/sqlcipher.git "refs/tags/v${TARGET}^{}" | cut -f1)
+            [ -n "$commit" ] || { echo "SQLCipher has no annotated tag v${TARGET}" >&2; exit 1; }
+            sed -i -E \
+              -e "s/^SQLCIPHER_NEXT_VERSION=\".*\"$/SQLCIPHER_NEXT_VERSION=\"${TARGET}\"/" \
+              -e "s/^SQLCIPHER_NEXT_COMMIT=\".*\"$/SQLCIPHER_NEXT_COMMIT=\"${commit}\"/" \
+              tools/releases.sh
+            {
+              echo "title=Test SQLCipher $TARGET as the next line"
+              echo "paths=tools/releases.sh"
+              echo "commit=$commit"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       # A pull request from the app, unlike one from the workflow token, starts CI, CodeQL,
       # Coverage and Sonar on it, and so does every later push to its branch.
@@ -100,18 +148,21 @@ jobs:
           GH_REPO: ${{ github.repository }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           VERSION: ${{ steps.release.outputs.target }}
+          PREFIX: ${{ steps.release.outputs.prefix }}
+          TITLE: ${{ steps.bump.outputs.title }}
+          PATHS: ${{ steps.bump.outputs.paths }}
+          COMMIT: ${{ steps.bump.outputs.commit }}
         run: |
           set -euo pipefail
-          sqlite=$(sed -nE 's/^pub const SQLITE_VERSION: &str = "(.*)";$/\1/p' src/lib.rs)
-          branch="sqlcipher/v$VERSION"
-          title="Generate from SQLCipher $VERSION on SQLite $sqlite"
+          branch="$PREFIX$VERSION"
           bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git checkout -b "$branch"
-          git add Cargo.toml Cargo.lock interop/web/Cargo.lock tools/releases.sh src/lib.rs sqlcipher
-          git commit -m "$title"
+          # shellcheck disable=SC2086 # PATHS is a list of paths without spaces.
+          git add $PATHS
+          git commit -m "$TITLE"
           # An unchanged push would only rerun every check, so the branch moves only when its
           # content changed or main moved under it.
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
@@ -128,12 +179,12 @@ jobs:
           open=$(gh pr list --head "$branch" --state open --json number --jq length)
           [ "$open" -gt 0 ] || gh pr create \
             --base main --head "$branch" \
-            --title "$title" \
-            --body "SQLCipher $VERSION, from https://github.com/sqlcipher/sqlcipher/releases/tag/v$VERSION. Its tag verified against the pinned key in keys/sqlcipher.asc, and the sources were generated from the commit it points at, $(sed -nE 's/^SQLCIPHER_COMMIT="(.*)"$/\1/p' tools/releases.sh)."
-          # Every other release branch is superseded, whether its pull request is open or closed.
+            --title "$TITLE" \
+            --body "SQLCipher $VERSION, from https://github.com/sqlcipher/sqlcipher/releases/tag/v$VERSION, at commit $COMMIT. CI takes its sources only from a tag signed by the pinned key in keys/sqlcipher.asc that points at that commit."
+          # Every other branch of this line is superseded, whether its pull request is open or closed.
           gh pr list --state open --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"sqlcipher/v\")) | select(.headRefName != \"$branch\") | .number" \
+            --jq ".[] | select(.headRefName | startswith(\"$PREFIX\")) | select(.headRefName != \"$branch\") | .number" \
             | while read -r n; do gh pr close "$n" --comment "Superseded by SQLCipher $VERSION."; done
-          git ls-remote --heads origin 'refs/heads/sqlcipher/v*' | cut -f2 \
+          git ls-remote --heads origin "refs/heads/${PREFIX}*" | cut -f2 \
             | { grep -vx "refs/heads/$branch" || true; } \
             | while read -r ref; do git push origin --delete "$ref"; done
