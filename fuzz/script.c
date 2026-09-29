@@ -35,6 +35,7 @@ enum op {
   OP_BACKUP,
   OP_DAMAGE,
   OP_READ,
+  OP_CACHE_RACE,
   OP_RAW_SQL,
   OP_COUNT,
 };
@@ -548,7 +549,6 @@ static void op_key(struct input *in, int rekey) {
   if (!db || (touched && !rekey)) return;
   apply_key(db, "main", &key, rekey, NULL);
   record(db_file, STEP_KEY, start, in->data);
-  if (key.passphrase) recipes[db_file].passphrase = 1;
 }
 
 static void op_setting(struct input *in) {
@@ -662,6 +662,50 @@ static void op_damage(struct input *in) {
   }
 }
 
+/* Deliberately races a pager cache state against a raw tamper: rekey, backup and VACUUM all copy pages through the
+   ordinary pager, and whether a given page is already cache-resident when they run decides whether they read it
+   fresh (through the codec, authenticated) or from memory (never re-touching the codec at all). Left to the general
+   op mix, landing on a specific page, tampering it, and then racing one of these against it is rare; this single op
+   makes the whole sequence, warm the page or not, corrupt it, then run the race, happen every time it is picked. */
+static void op_cache_race(struct input *in) {
+  unsigned warm = u8(in) & 1;
+  unsigned target = u8(in);
+  unsigned kind = u8(in) % 3;
+  unsigned char mask = u8(in) | 1;
+  unsigned page_offset = u16(in);
+  if (!db) return;
+  int count = memvfs_count();
+  if (!count) return;
+  int index = (int)(target % (unsigned)count);
+  if (file_of_memvfs(index) != db_file) return; /* keep the race on the file this connection has open */
+  long long size = memvfs_size(index);
+  int page_size = codec_page_size(db);
+  if (!size || page_size <= 0) return;
+  long long pgno = size / page_size ? (long long)(u32(in) % (unsigned long long)(size / page_size)) + 1 : 1;
+  long long at = (pgno - 1) * page_size + (long long)(page_offset % (unsigned)page_size);
+  if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, 1)) return;
+  touched = 1;
+  if (warm) {
+    sqlite3_stmt *stmt = NULL;
+    if (lib->prepare_v2(db, "SELECT data FROM sqlite_dbpage WHERE pgno = ?1", -1, &stmt, NULL) == SQLITE_OK) {
+      lib->bind_int64(stmt, 1, pgno);
+      lib->step(stmt);
+      lib->finalize(stmt);
+    }
+  }
+  memvfs_flip(index, at, mask);
+  tamper_flip(file_of_memvfs(index), memvfs_name(index), at, mask);
+  if (kind == 0) {
+    struct key key;
+    read_key(in, &key);
+    apply_key(db, "main", &key, 1, NULL);
+  } else if (kind == 1) {
+    op_backup(in);
+  } else if (!vacuum_blocked(db, known_vacuum("VACUUM", 6))) {
+    run(db, "VACUUM", NULL);
+  }
+}
+
 static void op_raw_sql(struct input *in) {
   struct input text = take(in, MAX_RAW_SQL);
   char sql[MAX_RAW_SQL + 1];
@@ -746,6 +790,9 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
          oracle would then read as if it were fresh. OP_REOPEN and script_dump check on a connection that never
          cached anything. */
       read_all(db, NULL);
+      break;
+    case OP_CACHE_RACE:
+      op_cache_race(in);
       break;
     case OP_RAW_SQL:
       op_raw_sql(in);
