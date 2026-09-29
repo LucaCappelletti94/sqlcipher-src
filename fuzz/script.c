@@ -546,10 +546,9 @@ static void op_key(struct input *in, int rekey) {
   read_key(in, &key);
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
   if (!db || (touched && !rekey)) return;
-  int rc = apply_key(db, "main", &key, rekey, NULL);
+  apply_key(db, "main", &key, rekey, NULL);
   record(db_file, STEP_KEY, start, in->data);
   if (key.passphrase) recipes[db_file].passphrase = 1;
-  if (rekey && rc == SQLITE_OK) tamper_clear(db_file); /* Rekey re-encrypts every page under the new key. */
 }
 
 static void op_setting(struct input *in) {

@@ -28,15 +28,6 @@ void tamper_reset_all(void) {
   memset(region_count, 0, sizeof region_count);
 }
 
-/* Drops every recorded tamper for file. A rekey re-encrypts every page under a new key, so tracking that survives
-   one is definitely stale regardless of hash timing: rekey reads each page through the pager like any other
-   access, and if that read raced a flip and still validated, the rekey's own re-encrypt overwrites the flipped
-   byte with fresh, valid ciphertext before this call ever gets a chance to compare hashes against it. */
-void tamper_clear(int file) {
-  if (file < 0 || file >= TAMPER_FILES) return;
-  region_count[file] = 0;
-}
-
 static unsigned long long fnv1a(const unsigned char *bytes, long long len) {
   unsigned long long hash = 1469598103934665603ULL;
   for (long long i = 0; i < len; i++) {
