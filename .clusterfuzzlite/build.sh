@@ -97,6 +97,14 @@ targets() {
         mkdir -p "$WORK/seeds/$binary"
         LLVM_PROFILE_FILE="$WORK/seedgen.profraw" "$WORK/seedgen$suffix$heap" "$WORK/seeds/$binary" "$SOURCES/prerelease"
         (cd "$WORK/seeds/$binary" && zip -q -r "$OUT/${binary}_seed_corpus.zip" .)
+        # keyed_file reads the same file images, so it starts from the same seeds.
+        local keyed="keyed_file$suffix$heap"
+        target keyed_file "$keyed" -DFUZZ_LIBRARY_TABLE="$table" -DFUZZ_PLAIN_TABLE=fuzz_sqlite_release_plain
+        # shellcheck disable=SC2086
+        $CXX $CXXFLAGS "$WORK/$keyed.o" "$WORK/pagemut.o" "$WORK/plaindiff.o" "${file_units[@]}" \
+            "$WORK/${variant}_libtomcrypt$heap.o" "$WORK/release_plain.o" $LIB_FUZZING_ENGINE -o "$OUT/$keyed"
+        cp "$OUT/${binary}_seed_corpus.zip" "$OUT/${keyed}_seed_corpus.zip"
+        printf '[libfuzzer]\nmax_len = 200000\n' | tee "$OUT/$binary.options" > "$OUT/$keyed.options"
     done
     # OpenSSL links statically, since the runner image that executes the targets has no libcrypto.
     # shellcheck disable=SC2086
@@ -104,7 +112,7 @@ targets() {
         "$WORK/${variant}_openssl.o" "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential$suffix"
 }
 
-for source in app known libstate memvfs random rawfile script; do
+for source in app known libstate memvfs pagemut plaindiff random rawfile script; do
     # shellcheck disable=SC2086
     $CC $CFLAGS -Wall -Wextra -Werror -c "$source.c" -o "$WORK/$source.o"
 done
@@ -117,6 +125,8 @@ system_heap=(-DSQLCIPHER_OMIT_MALLOC)
 spawn release libtomcrypt libtomcrypt.c
 spawn release libtomcrypt_system_heap libtomcrypt.c "${system_heap[@]}"
 spawn release openssl openssl.c -iquote ../sqlcipher
+# Plain SQLite from the same amalgamation, the reference keyed_file compares every line against.
+spawn release plain plain.c -iquote ../sqlcipher
 
 # The fetched lines, which 5.x only builds with SQLITE_DIRECT_OVERFLOW_READ off.
 for variant in beta prerelease; do

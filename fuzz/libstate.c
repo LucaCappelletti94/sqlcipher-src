@@ -60,11 +60,15 @@ void lib_reset(const struct fuzz_sqlite *api) {
   }
   if (!seen[slot].api) {
     int major = lib_int(api, handle, "PRAGMA cipher_version");
-    if (major < 4) abort();
+    if (major && major < 4) abort();
     seen[slot].api = api;
     seen[slot].major = major;
   }
   int major = seen[slot].major;
+  if (!major) {
+    api->close_v2(handle);
+    return;
+  }
   /* cipher_default_compatibility also restores the default page size, HMAC and KDF settings. */
   snprintf(reset, sizeof reset,
            "PRAGMA cipher_default_compatibility = %d;"

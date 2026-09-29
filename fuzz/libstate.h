@@ -6,7 +6,7 @@
 /* Puts a library's process-wide settings back to the same state before every input, and caches its major version. */
 void lib_reset(const struct fuzz_sqlite *api);
 
-/* SQLCipher major version of a library lib_reset has seen. */
+/* SQLCipher major version of a library lib_reset has seen, or 0 for plain SQLite. */
 int lib_major(const struct fuzz_sqlite *api);
 
 /* Runs every statement in sql, reading every column of every row, and returns the first failure. */

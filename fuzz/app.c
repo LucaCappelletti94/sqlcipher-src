@@ -67,7 +67,9 @@ sqlite3 *app_open(const struct fuzz_sqlite *api, const char *name, const struct 
   lib->limit(handle, SQLITE_LIMIT_VDBE_OP, 25000);
   lib->key_v2(handle, "main", key ? key : apps[in->app].key, (int)strlen(key ? key : apps[in->app].key));
   lib_exec(lib, handle, apps[in->app].settings);
-  if (in->page) {
+  /* L9: 4.x reads an unauthenticated page 1 with a non-default codec page size past its buffer. */
+  int unauthenticated = in->app == APP_COMPAT_1 || in->use_hmac_off;
+  if (in->page && !(major < 5 && unauthenticated)) {
     unsigned size = known_page_size(major, 1024u << (in->page - 1));
     snprintf(sql, sizeof sql, "PRAGMA cipher_page_size = %u", size > 65536 ? 65536 : size);
     lib_exec(lib, handle, sql);

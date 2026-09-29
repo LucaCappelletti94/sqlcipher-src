@@ -29,8 +29,10 @@ const struct fuzz_sqlite FUZZ_LIBRARY = {
     .bind_int64 = sqlite3_bind_int64,
     .bind_blob = sqlite3_bind_blob,
     .bind_text = sqlite3_bind_text,
+#ifndef FUZZ_PLAIN
     .key_v2 = sqlite3_key_v2,
     .rekey_v2 = sqlite3_rekey_v2,
+#endif
     .set_authorizer = sqlite3_set_authorizer,
     .progress_handler = sqlite3_progress_handler,
     .limit = sqlite3_limit,
