@@ -2,6 +2,9 @@
    build.sh puts the amalgamation's directory on the quote include path. */
 #include <unistd.h>
 
+#include "random.h"
+#define getentropy fuzz_getentropy
+
 #define SQLITE_HAS_CODEC 1
 #define SQLCIPHER_CRYPTO_LIBTOMCRYPT 1
 #define SQLITE_EXTRA_INIT fuzz_fetched_extra_init

@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "memvfs.h"
+#include "random.h"
 #include "script.h"
 
 extern const struct fuzz_sqlite FUZZ_LIBTOMCRYPT;
@@ -24,6 +25,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   const struct fuzz_sqlite *writer = data[0] & 1 ? &FUZZ_OPENSSL : &FUZZ_LIBTOMCRYPT;
   const struct fuzz_sqlite *reader = data[0] & 1 ? &FUZZ_LIBTOMCRYPT : &FUZZ_OPENSSL;
   memvfs_reset();
+  fuzz_random_reset();
   script_reset(writer);
   script_reset(reader);
   script_run(writer, &in, SCRIPT_STRUCTURED);

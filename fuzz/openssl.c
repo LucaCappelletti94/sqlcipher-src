@@ -11,6 +11,10 @@
 #define SQLITE_THREADSAFE 1
 #define SQLITE_MUTEX_NOOP 1
 
+#include "random.h"
+#define RAND_bytes fuzz_rand_bytes
+#define RAND_add fuzz_rand_add
+
 #include "sqlcipher.c"
 
 #include "library.h"
