@@ -31,7 +31,7 @@ cargo build --target wasm32-unknown-unknown
 
 Shared-memory builds (`+atomics`) also need `-mbulk-memory` in `CFLAGS_wasm32_unknown_unknown`.
 
-The sources are generated from signed SQLCipher and libtomcrypt releases by `upgrade.sh`. CI runs `rusqlite`'s SQLCipher tests on them natively, and checks that files written natively and in Node, Chrome and Firefox open on both sides.
+The sources are generated from signed SQLCipher and libtomcrypt releases by `upgrade.sh`. CI runs `rusqlite`'s SQLCipher tests on them natively, and checks that files written natively and in Node, Chrome and Firefox open on both sides. ClusterFuzzLite fuzzes the Wasm build natively under AddressSanitizer and UBSan, and checks that the libtomcrypt and OpenSSL builds read every fuzzed file the same way. It does the same for SQLCipher's signed 5.0.0 beta and for the tip of its `prerelease` branch.
 
 The same checks run on SQLCipher's newest signed pre-release, and daily on the heads of its `prerelease` and `beta` branches. Nothing from those lines ships.
 

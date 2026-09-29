@@ -7,6 +7,7 @@
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
+#include "tamper.h"
 #include "script.h"
 
 #define MAX_OPS 64
@@ -282,19 +283,22 @@ static void read_key(struct input *in, struct key *key) {
   key->kdf_iter = (int)(u8(in) % 4) + 1;
 }
 
-static void apply_key(sqlite3 *handle, const char *schema, const struct key *key, int rekey, struct dump *out) {
+static int apply_key(sqlite3 *handle, const char *schema, const struct key *key, int rekey, struct dump *out) {
   char sql[96];
   if (rekey) {
     if (major < 5) {
       snprintf(sql, sizeof sql, "PRAGMA \"%s\".rekey_kdf_iter = %d", schema, key->kdf_iter);
       run_trusted(handle, sql, out);
     }
-    dump_code(out, lib->rekey_v2(handle, schema, key->bytes, key->len));
-    return;
+    int rc = lib->rekey_v2(handle, schema, key->bytes, key->len);
+    dump_code(out, rc);
+    return rc;
   }
-  dump_code(out, lib->key_v2(handle, schema, key->bytes, key->len));
+  int rc = lib->key_v2(handle, schema, key->bytes, key->len);
+  dump_code(out, rc);
   snprintf(sql, sizeof sql, "PRAGMA \"%s\".kdf_iter = %d", schema, key->kdf_iter);
   run_trusted(handle, sql, out);
+  return rc;
 }
 
 static unsigned page_size(struct input *in) {
@@ -542,9 +546,10 @@ static void op_key(struct input *in, int rekey) {
   read_key(in, &key);
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
   if (!db || (touched && !rekey)) return;
-  apply_key(db, "main", &key, rekey, NULL);
+  int rc = apply_key(db, "main", &key, rekey, NULL);
   record(db_file, STEP_KEY, start, in->data);
   if (key.passphrase) recipes[db_file].passphrase = 1;
+  if (rekey && rc == SQLITE_OK) tamper_clear(db_file); /* Rekey re-encrypts every page under the new key. */
 }
 
 static void op_setting(struct input *in) {
@@ -622,6 +627,15 @@ static void op_backup(struct input *in) {
   lib->close_v2(dest);
 }
 
+/* The script file index memvfs slot index names, or -1 for a file the script did not create (a temp or super-journal). */
+static int file_of_memvfs(int index) {
+  const char *name = memvfs_name(index);
+  for (int i = 0; i < SCRIPT_FILES; i++) {
+    if (strcmp(files[i], name) == 0) return i;
+  }
+  return -1;
+}
+
 static void op_damage(struct input *in) {
   unsigned target = u8(in);
   unsigned kind = u8(in) % 3;
@@ -637,11 +651,15 @@ static void op_damage(struct input *in) {
   long long len = kind == 0 ? 1 : kind == 2 ? (long long)chunk.size : 0;
   if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, len)) return;
   if (kind == 0) {
-    if (size) memvfs_flip(index, at, (unsigned char)mask);
+    if (size) {
+      memvfs_flip(index, at, (unsigned char)mask);
+      tamper_flip(file_of_memvfs(index), memvfs_name(index), at, (unsigned char)mask);
+    }
   } else if (kind == 1) {
     memvfs_truncate(index, at);
   } else {
     memvfs_overwrite(index, at, chunk.data, chunk.size);
+    if (chunk.size) tamper_note(file_of_memvfs(index), memvfs_name(index), at, len);
   }
 }
 
@@ -675,7 +693,8 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
   budget = SCRIPT_BUDGET;
   memset(recipes, 0, sizeof recipes);
   for (int n = 0; n < MAX_OPS && in->size; n++) {
-    switch ((enum op)(u8(in) % ops)) {
+    unsigned opcode = u8(in) % ops;
+    switch ((enum op)opcode) {
     case OP_OPEN: {
       int file = (int)(u8(in) % SCRIPT_FILES);
       close_db();
@@ -724,6 +743,9 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
     case OP_READ:
       if (!db) break;
       touched = 1;
+      /* Not checked here: this connection may have cached the page from before a later OP_DAMAGE, which the tamper
+         oracle would then read as if it were fresh. OP_REOPEN and script_dump check on a connection that never
+         cached anything. */
       read_all(db, NULL);
       break;
     case OP_RAW_SQL:
@@ -742,6 +764,9 @@ void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
   sqlite3 *handle = open_file(file, 0);
   dump_code(out, handle ? SQLITE_OK : SQLITE_CANTOPEN);
   if (!handle) return;
-  if (!replay(handle, file, out)) read_all(handle, out); /* L8 */
+  if (!replay(handle, file, out)) {
+    read_all(handle, out);
+    tamper_check(lib, handle, file, files[file]);
+  } /* L8 */
   lib->close_v2(handle);
 }

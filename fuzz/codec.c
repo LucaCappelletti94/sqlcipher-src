@@ -3,12 +3,14 @@
 #include "memvfs.h"
 #include "random.h"
 #include "script.h"
+#include "tamper.h"
 
 extern const struct fuzz_sqlite FUZZ_LIBTOMCRYPT;
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   struct input in = {data, size};
   memvfs_reset();
+  tamper_reset_all();
   fuzz_random_reset();
   script_reset(&FUZZ_LIBTOMCRYPT);
   script_run(&FUZZ_LIBTOMCRYPT, &in, SCRIPT_WITH_RAW_SQL);
