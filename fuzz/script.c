@@ -5,6 +5,7 @@
 #include <strings.h>
 
 #include "known.h"
+#include "libstate.h"
 #include "memvfs.h"
 #include "script.h"
 
@@ -212,27 +213,13 @@ static int drain(sqlite3_stmt *stmt, struct dump *out) {
 
 /* The main database's codec page size, or 0 when it has no codec. */
 static int codec_page_size(sqlite3 *handle) {
-  sqlite3_stmt *stmt = NULL;
-  int size = 0;
-  if (lib->prepare_v2(handle, "PRAGMA main.cipher_page_size", -1, &stmt, NULL) != SQLITE_OK) return 0;
-  if (lib->step(stmt) == SQLITE_ROW) size = (int)lib->column_int64(stmt, 0);
-  lib->finalize(stmt);
-  return size;
-}
-
-static int pragma_int(sqlite3 *handle, const char *sql) {
-  sqlite3_stmt *stmt = NULL;
-  int value = 0;
-  if (lib->prepare_v2(handle, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
-  if (lib->step(stmt) == SQLITE_ROW) value = (int)lib->column_int64(stmt, 0);
-  lib->finalize(stmt);
-  return value;
+  return lib_int(lib, handle, "PRAGMA main.cipher_page_size");
 }
 
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
 static int vacuum_blocked(sqlite3 *handle, int vacuum) {
-  if (!vacuum || (vacuum == 1 && pragma_int(handle, "PRAGMA temp_store") != 1)) return 0;
-  return known_backup_blocked(major, codec_page_size(handle), pragma_int(handle, "PRAGMA cipher_default_page_size"));
+  if (!vacuum || (vacuum == 1 && lib_int(lib, handle, "PRAGMA temp_store") != 1)) return 0;
+  return known_backup_blocked(major, codec_page_size(handle), lib_int(lib, handle, "PRAGMA cipher_default_page_size"));
 }
 
 /* L8: the handle would read file's plaintext-header database with a different page size than the header states. */
@@ -255,7 +242,7 @@ static int run(sqlite3 *handle, const char *sql, struct dump *out) {
     }
     if (rc == SQLITE_OK && stmt) rc = drain(stmt, out);
     if (handle == db && !trusted) {
-      default_page = pragma_int(handle, "PRAGMA cipher_default_page_size");
+      default_page = lib_int(lib, handle, "PRAGMA cipher_default_page_size");
       touched = 1;
       if (header_mismatch(db, db_file)) break;
     }
@@ -668,54 +655,17 @@ static void op_raw_sql(struct input *in) {
   if (header_mismatch(db, db_file)) close_db(); /* L8 */
 }
 
-static struct {
-  const struct fuzz_sqlite *api;
-  int major;
-} seen[4];
-
 static void use(const struct fuzz_sqlite *api) {
   lib = api;
-  for (size_t i = 0; i < sizeof seen / sizeof *seen; i++) {
-    if (seen[i].api == api) {
-      major = seen[i].major;
-      return;
-    }
-  }
-  abort();
-}
-
-static int cipher_major(sqlite3 *handle) {
-  sqlite3_stmt *stmt = NULL;
-  int found = 0;
-  if (lib->prepare_v2(handle, "PRAGMA cipher_version", -1, &stmt, NULL) != SQLITE_OK) abort();
-  if (lib->step(stmt) == SQLITE_ROW) found = atoi((const char *)lib->column_blob(stmt, 0));
-  lib->finalize(stmt);
-  if (found < 4) abort();
-  return found;
+  major = lib_major(api);
 }
 
 void script_reset(const struct fuzz_sqlite *api) {
   sqlite3 *handle = NULL;
-  char reset[160];
-  size_t slot = 0;
-  lib = api;
-  api->hard_heap_limit64(0);
-  api->soft_heap_limit64(0);
-  api->randomness(0, NULL);
+  lib_reset(api);
+  use(api);
   if (api->open_v2(":memory:", &handle, SQLITE_OPEN_READWRITE, NULL) != SQLITE_OK) abort();
-  while (seen[slot].api && seen[slot].api != api) {
-    if (++slot == sizeof seen / sizeof *seen) abort();
-  }
-  seen[slot].api = api;
-  seen[slot].major = cipher_major(handle);
-  major = seen[slot].major;
-  snprintf(reset, sizeof reset,
-           "PRAGMA cipher_default_compatibility = %d;"
-           "PRAGMA cipher_default_kdf_iter = 2;"
-           "PRAGMA cipher_default_plaintext_header_size = 0%s",
-           major, major >= 5 ? ";PRAGMA cipher_default_hmac_fast_kdf = 0" : "");
-  if (run_trusted(handle, reset, NULL) != SQLITE_OK) abort();
-  default_page = pragma_int(handle, "PRAGMA cipher_default_page_size");
+  default_page = lib_int(lib, handle, "PRAGMA cipher_default_page_size");
   api->close_v2(handle);
 }
 

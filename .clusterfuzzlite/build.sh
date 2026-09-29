@@ -79,17 +79,32 @@ targets() {
     target differential "differential$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL="$openssl"
     for heap in "" _system_heap; do
         # shellcheck disable=SC2086
-        $CXX $CXXFLAGS "$WORK/codec$suffix$heap.o" "$WORK/script.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o" \
+        $CXX $CXXFLAGS "$WORK/codec$suffix$heap.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o" \
             "$WORK/${variant}_libtomcrypt$heap.o" $LIB_FUZZING_ENGINE -o "$OUT/codec$suffix$heap"
         cp codec.dict "$OUT/codec$suffix$heap.dict"
     done
+    for heap in "" _system_heap; do
+        local table="${libtomcrypt}$heap" binary="hostile_file$suffix$heap"
+        target hostile_file "$binary" -DFUZZ_LIBRARY_TABLE="$table"
+        target seedgen "seedgen$suffix$heap" -DFUZZ_LIBRARY_TABLE="$table"
+        # shellcheck disable=SC2086
+        $CXX $CXXFLAGS "$WORK/$binary.o" "${file_units[@]}" "$WORK/${variant}_libtomcrypt$heap.o" \
+            $LIB_FUZZING_ENGINE -o "$OUT/$binary"
+        # shellcheck disable=SC2086
+        $CXX $CXXFLAGS "$WORK/seedgen$suffix$heap.o" "${file_units[@]}" "$WORK/${variant}_libtomcrypt$heap.o" \
+            -o "$WORK/seedgen$suffix$heap"
+        # The seeds are built with the same library, so every variant starts from databases it wrote itself.
+        mkdir -p "$WORK/seeds/$binary"
+        LLVM_PROFILE_FILE="$WORK/seedgen.profraw" "$WORK/seedgen$suffix$heap" "$WORK/seeds/$binary" "$SOURCES/prerelease"
+        (cd "$WORK/seeds/$binary" && zip -q -r "$OUT/${binary}_seed_corpus.zip" .)
+    done
     # OpenSSL links statically, since the runner image that executes the targets has no libcrypto.
     # shellcheck disable=SC2086
-    $CXX $CXXFLAGS "$WORK/differential$suffix.o" "$WORK/script.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o" "$WORK/${variant}_libtomcrypt.o" \
+    $CXX $CXXFLAGS "$WORK/differential$suffix.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o" "$WORK/${variant}_libtomcrypt.o" \
         "$WORK/${variant}_openssl.o" "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential$suffix"
 }
 
-for source in known memvfs random script; do
+for source in app known libstate memvfs random rawfile script; do
     # shellcheck disable=SC2086
     $CC $CFLAGS -Wall -Wextra -Werror -c "$source.c" -o "$WORK/$source.o"
 done
@@ -112,6 +127,9 @@ for variant in beta prerelease; do
 done
 wait
 [ ! -e "$WORK/failed" ] || { echo "a SQLCipher library failed to compile" >&2; exit 1; }
+
+# The units every file-image binary links besides its target and its library.
+file_units=("$WORK/app.o" "$WORK/rawfile.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o")
 
 targets release ""
 targets beta _beta

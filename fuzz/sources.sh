@@ -1,5 +1,6 @@
 #!/bin/sh -e
-# Generates the SQLCipher amalgamations the fetched fuzz targets build, into $1/<variant>/sqlcipher.c: the signed beta
+# Generates the SQLCipher amalgamations the fetched fuzz targets build, into $1/<variant>/sqlcipher.c, next to the
+# testkey databases hostile_file seeds from: the signed beta
 # tag, and the tip of prerelease, the branch SQLCipher bases patches on, which no signature covers.
 
 mkdir -p "$1"
@@ -16,6 +17,7 @@ amalgamate() {
     (cd "$1" && ./configure > configure.log && make sqlite3.c > make.log)
     mkdir -p "$OUT/$2"
     cp "$1/sqlite3.c" "$OUT/$2/sqlcipher.c"
+    cp "$1"/sqlcipher-resources/sqlcipher-*-testkey.db "$OUT/$2/"
     echo "$3" > "$OUT/$2/COMMIT"
 }
 

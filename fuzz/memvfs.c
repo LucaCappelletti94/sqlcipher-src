@@ -315,6 +315,30 @@ int memvfs_header_page_size(const char *name) {
   return size == 1 ? 65536 : size;
 }
 
+int memvfs_install(const char *name, const unsigned char *bytes, size_t len) {
+  if (strlen(name) > MAX_NAME || lookup(name)) return SQLITE_CANTOPEN;
+  struct mem_data *data = NULL;
+  for (int i = 0; i < MAX_FILES && !data; i++) {
+    if (!files[i].used) data = &files[i];
+  }
+  if (!data) return SQLITE_CANTOPEN;
+  data->used = 1;
+  strcpy(data->name, name);
+  int rc = grow(data, (long long)len);
+  if (rc != SQLITE_OK) {
+    release(data);
+    return rc;
+  }
+  if (len) memcpy(data->bytes, bytes, len);
+  return SQLITE_OK;
+}
+
+const unsigned char *memvfs_peek(const char *name, size_t *len) {
+  struct mem_data *data = lookup(name);
+  *len = data ? (size_t)data->size : 0;
+  return data ? data->bytes : NULL;
+}
+
 void memvfs_flip(int index, long long offset, unsigned char mask) {
   struct mem_data *data = named(index);
   if (offset < data->size) data->bytes[offset] ^= mask;
