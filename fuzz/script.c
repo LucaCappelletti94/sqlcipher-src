@@ -4,6 +4,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "confidentiality.h"
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
@@ -45,7 +46,8 @@ enum op {
   OP_READ = 11,
   OP_CACHE_RACE = 12,
   OP_RAW_SQL = 13,
-  OP_COUNT = 14,
+  OP_CANARY = 14,
+  OP_COUNT = 15,
 };
 
 enum step_kind { STEP_KEY, STEP_SETTING };
@@ -224,6 +226,20 @@ static int drain(sqlite3_stmt *stmt, struct dump *out) {
 /* The main database's codec page size, or 0 when it has no codec. */
 static int codec_page_size(sqlite3 *handle) {
   return lib_int(lib, handle, "PRAGMA main.cipher_page_size");
+}
+
+/* Whether a trivial read through handle's schema actually decodes: forces a page 1 read, which fails (not
+   SQLITE_ROW or SQLITE_DONE) when the key just applied to this connection does not match content the file
+   already had, whether that content is plaintext or encrypted under a different key. A fresh, empty file
+   trivially passes, since there is nothing to fail to decode. */
+static int key_verified(sqlite3 *handle, const char *schema) {
+  char sql[64];
+  snprintf(sql, sizeof sql, "PRAGMA \"%s\".schema_version", schema);
+  sqlite3_stmt *stmt = NULL;
+  if (lib->prepare_v2(handle, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
+  int rc = lib->step(stmt);
+  lib->finalize(stmt);
+  return rc == SQLITE_ROW || rc == SQLITE_DONE;
 }
 
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
@@ -555,7 +571,12 @@ static void op_key(struct input *in, int rekey) {
   read_key(in, &key);
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
   if (!db || (touched && !rekey)) return;
-  apply_key(db, "main", &key, rekey, NULL);
+  int rc = apply_key(db, "main", &key, rekey, NULL);
+  /* A failed rekey (SQLITE_MISUSE on a database no key ever reached) leaves the file exactly as it was: nothing to
+     expect encryption of. rekey_v2 retroactively re-encrypts every existing page as part of the same call, so its
+     own SQLITE_OK is enough on its own; key_v2 does not, so a read has to confirm this key actually matches
+     whatever the file already had before trusting it, fresh empty file included. */
+  if (rc == SQLITE_OK && key.len > 0 && (rekey || key_verified(db, "main"))) confidentiality_mark_keyed(db_file);
   record(db_file, STEP_KEY, start, in->data);
 }
 
@@ -584,6 +605,9 @@ static void op_attach(struct input *in) {
   if (!db) return;
   touched = 1;
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
+  /* Each ATTACH targeting file is its own, independent keying event, so a prior attach's expectation for it,
+     possibly with a completely different key, must not carry over. */
+  confidentiality_forget_file(file);
   if (known_header_page_mismatch(major, memvfs_header_page_size(files[file]), default_page)) return; /* L8 */
   recipes[file].count = 0;
   recipes[file].passphrase = key.passphrase;
@@ -596,6 +620,9 @@ static void op_attach(struct input *in) {
   int rc = drain(stmt, NULL);
   trusted = 0;
   if (rc != SQLITE_OK) return;
+  /* Same reasoning as op_key: attaching with a key never retroactively encrypts content the file already had, so
+     a read has to confirm this key actually matches it first. */
+  if (key.len > 0 && key_verified(db, "aux")) confidentiality_mark_keyed(file);
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
@@ -618,9 +645,15 @@ static void op_backup(struct input *in) {
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
   sqlite3 *dest = open_file(file, 1);
   if (!dest) return;
+  /* Each backup targeting file is its own, independent keying event, so an earlier one's expectation for it,
+     possibly with a completely different key, must not carry over. */
+  confidentiality_forget_file(file);
   recipes[file].count = 0;
   recipes[file].passphrase = key.passphrase;
-  apply_key(dest, "main", &key, 0, NULL);
+  int rc = apply_key(dest, "main", &key, 0, NULL);
+  /* Same reasoning as op_key: key_v2 on dest never retroactively encrypts content dest already had, so a read has
+     to confirm this key actually matches it first. */
+  if (rc == SQLITE_OK && key.len > 0 && key_verified(dest, "main")) confidentiality_mark_keyed(file);
   record(file, STEP_KEY, start, in->data);
   if (known_backup_blocked(major, codec_page_size(db), codec_page_size(dest))) {
     lib->close_v2(dest);
@@ -632,6 +665,13 @@ static void op_backup(struct input *in) {
     lib->backup_finish(backup);
   }
   lib->close_v2(dest);
+}
+
+static void op_canary(struct input *in) {
+  (void)in;
+  if (!db) return;
+  touched = 1;
+  confidentiality_plant(lib, db);
 }
 
 /* The script file index memvfs slot index names, or -1 for a file the script did not create (a temp or super-journal). */
@@ -742,13 +782,13 @@ void script_reset(const struct fuzz_sqlite *api) {
 }
 
 void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mode mode) {
-  unsigned ops = mode == SCRIPT_WITH_RAW_SQL ? OP_COUNT : OP_RAW_SQL;
   use(api);
   budget = SCRIPT_BUDGET;
   memset(recipes, 0, sizeof recipes);
   for (int n = 0; n < MAX_OPS && in->size; n++) {
     unsigned opcode = u8(in) & OP_MASK;
-    if (opcode >= ops) continue; /* Reserved for a future op, or OP_RAW_SQL outside SCRIPT_WITH_RAW_SQL: no-op. */
+    if (opcode >= OP_COUNT) continue; /* Reserved for a future op: no-op. */
+    if (opcode == OP_RAW_SQL && mode != SCRIPT_WITH_RAW_SQL) continue; /* Only the single-build target can afford it. */
     switch ((enum op)opcode) {
     case OP_OPEN: {
       int file = (int)(u8(in) % SCRIPT_FILES);
@@ -756,6 +796,7 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       db = open_file(file, 1);
       if (db) db_file = file;
       memset(&recipes[file], 0, sizeof recipes[file]);
+      confidentiality_forget_file(file);
       break;
     }
     case OP_REOPEN: {
@@ -809,11 +850,15 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
     case OP_RAW_SQL:
       op_raw_sql(in);
       break;
+    case OP_CANARY:
+      op_canary(in);
+      break;
     case OP_COUNT:
       abort();
     }
   }
   close_db();
+  confidentiality_check(files, SCRIPT_FILES);
 }
 
 void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {

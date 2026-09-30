@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "confidentiality.h"
 #include "memvfs.h"
 #include "random.h"
 #include "script.h"
@@ -27,6 +28,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   const struct fuzz_sqlite *reader = data[0] & 1 ? &FUZZ_LIBTOMCRYPT : &FUZZ_OPENSSL;
   memvfs_reset();
   tamper_reset_all();
+  confidentiality_reset();
   fuzz_random_reset();
   script_reset(writer);
   script_reset(reader);
