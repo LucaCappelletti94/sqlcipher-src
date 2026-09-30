@@ -8,6 +8,7 @@
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
+#include "model.h"
 #include "tamper.h"
 #include "uniqueness.h"
 #include "script.h"
@@ -51,7 +52,7 @@ enum op {
   OP_COUNT = 15,
 };
 
-enum step_kind { STEP_KEY, STEP_SETTING };
+enum step_kind { STEP_KEY, STEP_REKEY, STEP_SETTING };
 
 /* A step is the input slice its operation parsed, so replaying it rebuilds the same key or pragma. */
 struct step {
@@ -88,6 +89,11 @@ static int default_page;
 static int trusted;
 static long budget;
 static struct recipe recipes[SCRIPT_FILES];
+/* Whether OP_OPEN has ever made file the connection's own db_file before, for the model oracle: a second OP_OPEN
+   targeting it discards its recorded recipe right there, but anything a prior connection to the same index
+   already wrote, export included, persists in the file underneath regardless, so a later reopen's replay is not
+   this module's finding to make once that has ever happened, whatever the recipe it discarded looked like. */
+static int ever_db_file[SCRIPT_FILES];
 
 static unsigned u8(struct input *in) {
   if (!in->size) return 0;
@@ -475,20 +481,26 @@ static void record(int file, enum step_kind kind, const uint8_t *start, const ui
   recipe->count++;
 }
 
-/* Returns nonzero when the replayed settings disagree with the file's plaintext header (L8). */
+/* Returns nonzero when either the file's plaintext header disagrees with what was replayed (L8) or a key step
+   itself failed to reapply: replay never replays the content writes between two key events, only the key and
+   setting pragmas, so a passphrase key's KDF iteration count can still legitimately be pending, not yet locked
+   in by an actual page read, at a point a script's own writes had already locked it in; a rekey step replayed
+   with no such write in between can fail to derive the same old key the original run's writes had already fixed.
+   Either way, nothing downstream should trust what handle now holds. */
 static int replay(sqlite3 *handle, int file, struct dump *out) {
   const struct recipe *recipe = &recipes[file];
+  int failed = 0;
   for (int i = 0; i < recipe->count; i++) {
     struct input slice = recipe->steps[i].slice;
-    if (recipe->steps[i].kind == STEP_KEY) {
+    if (recipe->steps[i].kind == STEP_KEY || recipe->steps[i].kind == STEP_REKEY) {
       struct key key;
       read_key(&slice, &key);
-      apply_key(handle, "main", &key, 0, out);
+      if (apply_key(handle, "main", &key, recipe->steps[i].kind == STEP_REKEY, out) != SQLITE_OK) failed = 1;
     } else {
       apply_setting(handle, "main", &slice, out);
     }
   }
-  return header_mismatch(handle, file);
+  return failed || header_mismatch(handle, file);
 }
 
 static void read_all(sqlite3 *handle, struct dump *out) {
@@ -556,8 +568,9 @@ static void op_statement(struct input *in) {
   struct input text = take(in, 256);
   if (!db) return;
   touched = 1;
+  int is_migrate = strcmp(statements[index], "PRAGMA cipher_migrate") == 0;
   /* Migration retries the passphrase at the legacy kdf_iter counts, far beyond a fuzz iteration's time. */
-  if (strcmp(statements[index], "PRAGMA cipher_migrate") == 0 && recipes[db_file].passphrase) return;
+  if (is_migrate && recipes[db_file].passphrase) return;
   if (vacuum_blocked(db, known_vacuum(statements[index], strlen(statements[index])))) return;
   sqlite3_stmt *stmt = NULL;
   if (lib->prepare_v2(db, statements[index], -1, &stmt, NULL) != SQLITE_OK) return;
@@ -565,8 +578,14 @@ static void op_statement(struct input *in) {
   lib->bind_int64(stmt, 2, small);
   lib->bind_text(stmt, 3, (const char *)text.data, (int)text.size, SQLITE_TRANSIENT);
   trusted = 1;
-  drain(stmt, NULL);
+  int migrate_check = is_migrate && !known_migrate_poisons(recipes[db_file].passphrase);
+  if (migrate_check) model_snapshot(lib, db, "main", db_file);
+  int rc = drain(stmt, NULL);
   trusted = 0;
+  if (migrate_check) {
+    if (rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "cipher_migrate");
+    else model_discard();
+  }
 }
 
 static void op_pragma(struct input *in) {
@@ -602,14 +621,32 @@ static void op_key(struct input *in, int rekey) {
   read_key(in, &key);
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
   if (!db || (touched && !rekey)) return;
+  if (rekey) model_snapshot(lib, db, "main", db_file);
   int rc = apply_key(db, "main", &key, rekey, NULL);
+  if (rekey) {
+    if (rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "rekey");
+    else model_discard();
+  }
+  /* replay only ever reapplies key and setting steps back to back, with no chance for whatever the original run
+     did between the key and this rekey, a read included, to affect whether this rekey itself succeeds or fails
+     the same way: a rekey that failed here because something earlier had already touched the file can still
+     succeed when replayed without that earlier touch, landing the replayed connection on a different key than
+     this run's own. Marked regardless of this rekey's own outcome, since the recorded step gets replayed either
+     way. */
+  if (rekey) model_note_damage(db_file);
   /* cipher_migrate needs the connection's underived passphrase, which SQLCipher discards after the first real
      page access derives the actual key, so it only ever has a chance right here, before anything else, the
      key_verified read below included, touches the connection: op_statement's own "PRAGMA cipher_migrate" entry
      can only ever hit the immediate SQLITE_MISUSE bailout once picked among ~23 other choices with no ordering
      guarantee relative to the key. */
   if (!rekey && rc == SQLITE_OK && !key.passphrase && key.migrate) {
-    run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
+    int migrate_check = !known_migrate_poisons(key.passphrase);
+    if (migrate_check) model_snapshot(lib, db, "main", db_file);
+    int migrate_rc = run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
+    if (migrate_check) {
+      if (migrate_rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "cipher_migrate");
+      else model_discard();
+    }
     touched = 1;
   }
   /* A failed rekey (SQLITE_MISUSE on a database no key ever reached) leaves the file exactly as it was: nothing to
@@ -626,6 +663,7 @@ static void op_key(struct input *in, int rekey) {
   if (!rekey && rc == SQLITE_OK) {
     unsigned long long before_hash = tamper_hash_file(files[db_file]);
     int vrc = key_verified(db, "main");
+    touched = 1; /* key_verified's own read, success or failure, already derived the key against a real page. */
     tamper_check_wrong_key(vrc, before_hash, files[db_file]);
     if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(db_file);
   } else if (rc == SQLITE_OK && key.len > 0) {
@@ -634,7 +672,7 @@ static void op_key(struct input *in, int rekey) {
     confidentiality_forget_file(db_file);
   }
   if (rc == SQLITE_OK && key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(db_file);
-  record(db_file, STEP_KEY, start, in->data);
+  record(db_file, rekey ? STEP_REKEY : STEP_KEY, start, in->data);
 }
 
 static void op_setting(struct input *in) {
@@ -694,7 +732,37 @@ static void op_attach(struct input *in) {
     if (chosen == SET_SALT) uniqueness_note_explicit_salt(file);
     record(file, STEP_SETTING, setting, in->data);
   }
-  run_trusted(db, PICK(in, moves), NULL);
+  unsigned move_idx = u8(in) % (sizeof moves / sizeof *moves);
+  int move_rc;
+  if (move_idx == 0) {
+    /* sqlcipher_export('aux'): copies db_file's own "main" content into file's "aux", content replay() has no
+       record of when it later reconstructs file from file's own recipe alone. */
+    model_snapshot(lib, db, "main", db_file);
+    move_rc = run_trusted(db, moves[0], NULL);
+    if (move_rc == SQLITE_OK) {
+      model_check_contains(lib, db, "aux", file, files[file], "sqlcipher_export");
+      model_note_damage(file);
+    } else {
+      model_discard();
+    }
+  } else if (move_idx == 1) {
+    /* sqlcipher_export('main', 'aux'): copies file's own "aux" content into db_file's "main", content replay()
+       has no record of when it later reconstructs db_file from db_file's own recipe alone. */
+    model_snapshot(lib, db, "aux", file);
+    move_rc = run_trusted(db, moves[1], NULL);
+    if (move_rc == SQLITE_OK) {
+      model_check_contains(lib, db, "main", db_file, files[db_file], "sqlcipher_export");
+      model_note_damage(db_file);
+    } else {
+      model_discard();
+    }
+  } else {
+    /* A read-only move: nothing between here and DETACH should change what ATTACH itself already made visible. */
+    model_snapshot(lib, db, "aux", file);
+    move_rc = run_trusted(db, moves[2], NULL);
+    if (move_rc == SQLITE_OK) model_check(lib, db, "aux", file, files[file], "attach");
+    else model_discard();
+  }
   uniqueness_check(lib, db, "aux", file, files[file]);
   run_trusted(db, "DETACH aux", NULL);
 }
@@ -732,8 +800,15 @@ static void op_backup(struct input *in) {
   }
   sqlite3_backup *backup = lib->backup_init(dest, "main", db, "main");
   if (backup) {
-    lib->backup_step(backup, -1);
+    model_snapshot(lib, db, "main", db_file);
+    int step_rc = lib->backup_step(backup, -1);
     lib->backup_finish(backup);
+    if (step_rc == SQLITE_DONE) model_check(lib, dest, "main", file, files[file], "backup");
+    else model_discard();
+    /* backup_step's own page-level reads against db's pager leave a later reopen on db_file free to show less
+       than this same connection's own cache did, at least under system_heap's allocator_may_return_null=1; not
+       nailed down further, so db_file is exempt from this module's own later checks for the rest of the run. */
+    model_note_damage(db_file);
   }
   uniqueness_check(lib, dest, "main", file, files[file]);
   lib->close_v2(dest);
@@ -774,14 +849,17 @@ static void op_damage(struct input *in) {
       memvfs_flip(index, at, (unsigned char)mask);
       tamper_flip(file_of_memvfs(index), memvfs_name(index), at, (unsigned char)mask);
       uniqueness_note_damage(file_of_memvfs(index));
+      model_note_damage(file_of_memvfs(index));
     }
   } else if (kind == 1) {
     memvfs_truncate(index, at);
+    model_note_damage(file_of_memvfs(index));
   } else {
     memvfs_overwrite(index, at, chunk.data, chunk.size);
     if (chunk.size) {
       tamper_note(file_of_memvfs(index), memvfs_name(index), at, len);
       uniqueness_note_damage(file_of_memvfs(index));
+      model_note_damage(file_of_memvfs(index));
     }
   }
 }
@@ -820,12 +898,13 @@ static void op_cache_race(struct input *in) {
   memvfs_flip(index, at, mask);
   tamper_flip(file_of_memvfs(index), memvfs_name(index), at, mask);
   uniqueness_note_damage(file_of_memvfs(index));
+  model_note_damage(file_of_memvfs(index));
   if (kind == 0) {
     const uint8_t *start = in->data;
     struct key key;
     read_key(in, &key);
     apply_key(db, "main", &key, 1, NULL);
-    record(db_file, STEP_KEY, start, in->data);
+    record(db_file, STEP_REKEY, start, in->data);
     if (key.passphrase) recipes[db_file].passphrase = 1;
   } else if (kind == 1) {
     op_backup(in);
@@ -862,6 +941,7 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
   use(api);
   budget = SCRIPT_BUDGET;
   memset(recipes, 0, sizeof recipes);
+  memset(ever_db_file, 0, sizeof ever_db_file);
   for (int n = 0; n < MAX_OPS && in->size; n++) {
     unsigned opcode = u8(in) & OP_MASK;
     if (opcode >= OP_COUNT) continue; /* Reserved for a future op: no-op. */
@@ -872,6 +952,13 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       close_db();
       db = open_file(file, 1);
       if (db) db_file = file;
+      /* Reopening a file that has already been this connection's own db_file before discards its recorded
+         recipe right here, but the file's own bytes, and anything a prior connection to this same index already
+         wrote underneath, export included, persist regardless; a later reopen's replay only ever reconstructs
+         from what gets recorded from this point on, so it is not this module's finding if that turns out not to
+         match a connection that read straight through from here. */
+      if (ever_db_file[file]) model_note_damage(file);
+      ever_db_file[file] = 1;
       memset(&recipes[file], 0, sizeof recipes[file]);
       confidentiality_forget_file(file);
       break;
@@ -879,11 +966,21 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
     case OP_REOPEN: {
       int file = db_file;
       if (file < 0) break;
+      /* An explicit BEGIN left open here is rolled back by close_db's own implicit close_v2 rollback, exactly as
+         SQLite documents: content visible here only because this connection can see its own uncommitted writes
+         legitimately disappears on reopen, which is not this module's finding. */
+      int can_check = lib->get_autocommit(db);
+      if (can_check) model_snapshot(lib, db, "main", file);
       close_db();
       db = open_file(file, 0);
       if (!db) break;
       db_file = file;
-      if (replay(db, file, NULL)) close_db(); /* L8 */
+      if (replay(db, file, NULL)) { /* L8 */
+        close_db();
+        if (can_check) model_discard();
+      } else if (can_check) {
+        model_check(lib, db, "main", file, files[file], "reopen");
+      }
       break;
     }
     case OP_CLOSE:

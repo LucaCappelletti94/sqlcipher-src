@@ -76,6 +76,10 @@ int known_late_setting(const char *name) {
          (strncasecmp(name, "cipher_", 7) == 0 && strncasecmp(name, "cipher_default_", 15) != 0);
 }
 
+int known_migrate_poisons(int passphrase) {
+  return !passphrase; /* L11 */
+}
+
 /* L7: sqlcipherCodecGetKey copies a zero-length pass that its callers never free. */
 const char *__lsan_default_suppressions(void);
 const char *__lsan_default_suppressions(void) {
