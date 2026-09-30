@@ -91,20 +91,27 @@ static int page_of(long long offset, int page_size) {
   return (int)(offset / page_size) + 1;
 }
 
-/* Whether a read of pgno through sqlite_dbpage returns non-zero data with SQLITE_OK, in which case it aborts. */
-static void check_page(const struct fuzz_sqlite *api, sqlite3 *db, const char *file_name, int pgno) {
+/* Whether a read of pgno through sqlite_dbpage returns non-zero data in [lo, hi) (file offsets, clipped to this
+   page) with SQLITE_OK, in which case it aborts. Checking only the tampered, authenticated slice rather than the
+   whole page avoids firing when the flip lands in unused b-tree free space: real corruption there still decodes to
+   the same zero bytes a clean page would show, since nothing logical reads that space, so it carries no signal that
+   the tamper reached anything meaningful. */
+static void check_page(const struct fuzz_sqlite *api, sqlite3 *db, const char *file_name, int pgno, long long lo,
+                        long long hi) {
   sqlite3_stmt *stmt = NULL;
   if (api->prepare_v2(db, "SELECT data FROM sqlite_dbpage WHERE pgno = ?1", -1, &stmt, NULL) != SQLITE_OK) return;
   api->bind_int64(stmt, 1, pgno);
   if (api->step(stmt) == SQLITE_ROW) {
     const unsigned char *bytes = api->column_blob(stmt, 0);
     int len = api->column_bytes(stmt, 0);
+    long long from = lo < 0 ? 0 : lo, to = hi > len ? len : hi;
     int zero = 1;
-    for (int i = 0; bytes && zero && i < len; i++) zero = bytes[i] == 0;
-    if (bytes && len > 0 && !zero) {
+    for (long long i = from; bytes && zero && i < to; i++) zero = bytes[i] == 0;
+    if (bytes && to > from && !zero) {
       api->finalize(stmt);
-      fprintf(stderr, "oracle=tamper file=%s page=%d reason=read-back returned %d non-zero bytes with SQLITE_OK\n",
-              file_name, pgno, len);
+      fprintf(stderr, "oracle=tamper file=%s page=%d reason=read-back returned non-zero data in the tampered range "
+                       "with SQLITE_OK\n",
+              file_name, pgno);
       abort();
     }
   }
@@ -163,7 +170,6 @@ void tamper_check(const struct fuzz_sqlite *api, sqlite3 *db, int file, const ch
       reserve_sz = raw % 16 == 0 ? raw : (raw / 16 + 1) * 16;
     }
   }
-  unsigned char seen[MAX_PAGE_CHECK] = {0};
   for (int i = 0; i < region_count[file]; i++) {
     long long start = regions[file][i].offset, end = start + regions[file][i].len;
     if (end > (long long)have) continue; /* The file shrank since; nothing to compare against. */
@@ -176,9 +182,8 @@ void tamper_check(const struct fuzz_sqlite *api, sqlite3 *db, int file, const ch
       if (pgno == 1 && lo < unauthenticated) lo = unauthenticated;
       long long hi = end < populated_end ? end : populated_end;
       if (lo >= hi) continue; /* Entirely inside the unauthenticated header or the reserve's unpopulated tail. */
-      if (pgno < 1 || pgno >= MAX_PAGE_CHECK || seen[pgno]) continue;
-      seen[pgno] = 1;
-      check_page(api, db, file_name, pgno);
+      if (pgno < 1 || pgno >= MAX_PAGE_CHECK) continue;
+      check_page(api, db, file_name, pgno, lo - page_start, hi - page_start);
     }
   }
 }
