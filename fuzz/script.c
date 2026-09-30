@@ -231,19 +231,23 @@ static int codec_page_size(sqlite3 *handle) {
   return lib_int(lib, handle, "PRAGMA main.cipher_page_size");
 }
 
-/* Whether a trivial read through handle's schema actually decodes: forces a page 1 read, which fails (not
-   SQLITE_ROW or SQLITE_DONE) when the key just applied to this connection does not match content the file
-   already had, whether that content is plaintext or encrypted under a different key. A fresh, empty file
-   trivially passes, since there is nothing to fail to decode. */
+/* Whether a trivial read through handle's schema actually decodes: forces a page 1 read, which returns something
+   other than SQLITE_ROW or SQLITE_DONE when the key just applied to this connection does not match content the
+   file already had, whether that content is plaintext or encrypted under a different key. A fresh, empty file
+   trivially passes, since there is nothing to fail to decode. Returns the raw result code, for the wrong-key
+   oracle to check directly rather than just a pass/fail boolean. */
 static int key_verified(sqlite3 *handle, const char *schema) {
   char sql[64];
   snprintf(sql, sizeof sql, "PRAGMA \"%s\".schema_version", schema);
   sqlite3_stmt *stmt = NULL;
-  if (lib->prepare_v2(handle, sql, -1, &stmt, NULL) != SQLITE_OK) return 0;
-  int rc = lib->step(stmt);
+  int rc = lib->prepare_v2(handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) return rc;
+  rc = lib->step(stmt);
   lib->finalize(stmt);
-  return rc == SQLITE_ROW || rc == SQLITE_DONE;
+  return rc;
 }
+
+static int verified(int rc) { return rc == SQLITE_ROW || rc == SQLITE_DONE; }
 
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
 static int vacuum_blocked(sqlite3 *handle, int vacuum) {
@@ -601,8 +605,22 @@ static void op_key(struct input *in, int rekey) {
   /* A failed rekey (SQLITE_MISUSE on a database no key ever reached) leaves the file exactly as it was: nothing to
      expect encryption of. rekey_v2 retroactively re-encrypts every existing page as part of the same call, so its
      own SQLITE_OK is enough on its own; key_v2 does not, so a read has to confirm this key actually matches
-     whatever the file already had before trusting it, fresh empty file included. */
-  if (rc == SQLITE_OK && key.len > 0 && (rekey || key_verified(db, "main"))) confidentiality_mark_keyed(db_file);
+     whatever the file already had before trusting it, fresh empty file included. rekey_v2 itself never gets this
+     far wrong the way a wrong-key oracle checks: a mismatched old key fails apply_key outright (SQLITE_MISUSE
+     above), not silently. A successful rekey to an empty key removes the codec and writes the file back out in
+     plaintext just as definitively as a non-empty key encrypts it, so it has to clear expect_encrypted the same
+     way opening or attaching the file already does, not leave the prior key's mark standing over content the
+     empty rekey just decrypted itself. */
+  if (!rekey && rc == SQLITE_OK) {
+    unsigned long long before_hash = tamper_hash_file(files[db_file]);
+    int vrc = key_verified(db, "main");
+    tamper_check_wrong_key(vrc, before_hash, files[db_file]);
+    if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(db_file);
+  } else if (rc == SQLITE_OK && key.len > 0) {
+    confidentiality_mark_keyed(db_file);
+  } else if (rekey && rc == SQLITE_OK && key.len == 0) {
+    confidentiality_forget_file(db_file);
+  }
   record(db_file, STEP_KEY, start, in->data);
 }
 
@@ -648,7 +666,10 @@ static void op_attach(struct input *in) {
   if (rc != SQLITE_OK) return;
   /* Same reasoning as op_key: attaching with a key never retroactively encrypts content the file already had, so
      a read has to confirm this key actually matches it first. */
-  if (key.len > 0 && key_verified(db, "aux")) confidentiality_mark_keyed(file);
+  unsigned long long before_hash = tamper_hash_file(files[file]);
+  int vrc = key_verified(db, "aux");
+  tamper_check_wrong_key(vrc, before_hash, files[file]);
+  if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
@@ -679,7 +700,12 @@ static void op_backup(struct input *in) {
   int rc = apply_key(dest, "main", &key, 0, NULL);
   /* Same reasoning as op_key: key_v2 on dest never retroactively encrypts content dest already had, so a read has
      to confirm this key actually matches it first. */
-  if (rc == SQLITE_OK && key.len > 0 && key_verified(dest, "main")) confidentiality_mark_keyed(file);
+  if (rc == SQLITE_OK) {
+    unsigned long long before_hash = tamper_hash_file(files[file]);
+    int vrc = key_verified(dest, "main");
+    tamper_check_wrong_key(vrc, before_hash, files[file]);
+    if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
+  }
   record(file, STEP_KEY, start, in->data);
   if (known_backup_blocked(major, codec_page_size(db), codec_page_size(dest))) {
     lib->close_v2(dest);

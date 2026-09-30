@@ -187,3 +187,21 @@ void tamper_check(const struct fuzz_sqlite *api, sqlite3 *db, int file, const ch
     }
   }
 }
+
+unsigned long long tamper_hash_file(const char *file_name) {
+  size_t len = 0;
+  const unsigned char *bytes = memvfs_peek(file_name, &len);
+  return bytes ? fnv1a(bytes, (long long)len) : 0;
+}
+
+void tamper_check_wrong_key(int rc, unsigned long long before_hash, const char *file_name) {
+  if (rc == SQLITE_ROW || rc == SQLITE_DONE) return; /* The key matched: nothing to check. */
+  /* Which non-success code comes back is not itself checked: an allocation or I/O failure hitting the same read
+     can surface as SQLITE_NOMEM or SQLITE_IOERR instead of the codec's own SQLITE_NOTADB, and the triage bar
+     already treats a wrong code from an allocation or I/O failure as trivial as long as the data stays
+     consistent, which is exactly what this checks. */
+  if (tamper_hash_file(file_name) != before_hash) {
+    fprintf(stderr, "oracle=wrongkey file=%s reason=raw bytes changed after a key mismatch\n", file_name);
+    abort();
+  }
+}

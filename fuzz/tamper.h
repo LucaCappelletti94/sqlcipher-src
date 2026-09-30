@@ -31,4 +31,17 @@ void tamper_flip(int file, const char *file_name, long long offset, unsigned cha
    successful read of that slice. */
 void tamper_check(const struct fuzz_sqlite *api, sqlite3 *db, int file, const char *file_name);
 
+/* Hashes file_name's current raw bytes, for a later tamper_check_wrong_key call to compare against. 0 for a file
+   that does not exist yet. */
+unsigned long long tamper_hash_file(const char *file_name);
+
+/* Checks that a key application script.c's own key_verified could not confirm left file_name's raw bytes exactly
+   as they were, hash-compared against before_hash, taken immediately before the key was applied: a wrong key
+   must never leave a corrupted or partially-written file behind, whatever result code key_verified's own read
+   got back. That code is not itself checked: the triage bar already treats a wrong code from an allocation or
+   I/O failure as trivial as long as the data stays consistent, so only the data is. A key_verified success
+   (SQLITE_ROW or SQLITE_DONE) is not a wrong key and returns without checking anything. Aborts with a one-line
+   reason naming the oracle on a byte change. */
+void tamper_check_wrong_key(int rc, unsigned long long before_hash, const char *file_name);
+
 #endif
