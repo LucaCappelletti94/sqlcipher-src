@@ -70,6 +70,9 @@ struct key {
   int len;
   int passphrase;
   int kdf_iter;
+  /* Raw-hex-key path only: whether op_key should run PRAGMA cipher_migrate immediately after this key, its only
+     chance to see the connection's still-present underived passphrase. */
+  int migrate;
 };
 
 static const struct fuzz_sqlite *lib;
@@ -299,6 +302,7 @@ static void read_key(struct input *in, struct key *key) {
     hex((char *)key->bytes + 2, raw, len);
     key->bytes[2 + 2 * len] = '\'';
     key->len = 3 + 2 * len;
+    key->migrate = (form & 4) != 0;
   } else {
     struct input pass = take(in, 64);
     memcpy(key->bytes, pass.data, pass.size);
@@ -350,16 +354,17 @@ enum setting {
   SET_CIPHER,
   SET_AEAD,
   SET_HMAC_FAST_KDF,
+  SET_ADD_RANDOM,
 };
 
 /* 5.x removes the deprecated pragmas and adds the AEAD switches. */
 static const enum setting settings_4[] = {
-    SET_PAGE_SIZE, SET_USE_HMAC,  SET_HMAC_ALGORITHM, SET_KDF_ALGORITHM, SET_HEADER_SIZE, SET_SALT,
-    SET_COMPATIBILITY, SET_KDF_ITER, SET_HMAC_PGNO, SET_FAST_KDF_ITER, SET_CIPHER,
+    SET_PAGE_SIZE,     SET_USE_HMAC,    SET_HMAC_ALGORITHM, SET_KDF_ALGORITHM, SET_HEADER_SIZE, SET_SALT,
+    SET_COMPATIBILITY, SET_KDF_ITER,    SET_HMAC_PGNO,      SET_FAST_KDF_ITER, SET_CIPHER,      SET_ADD_RANDOM,
 };
 static const enum setting settings_5[] = {
-    SET_PAGE_SIZE, SET_USE_HMAC,  SET_HMAC_ALGORITHM, SET_KDF_ALGORITHM, SET_HEADER_SIZE, SET_SALT,
-    SET_COMPATIBILITY, SET_KDF_ITER, SET_AEAD, SET_HMAC_FAST_KDF,
+    SET_PAGE_SIZE,     SET_USE_HMAC, SET_HMAC_ALGORITHM, SET_KDF_ALGORITHM, SET_HEADER_SIZE, SET_SALT,
+    SET_COMPATIBILITY, SET_KDF_ITER, SET_AEAD,           SET_HMAC_FAST_KDF, SET_ADD_RANDOM,
 };
 
 /* One codec pragma on schema, followed by a cheap kdf_iter wherever the pragma would restore an expensive one. */
@@ -372,6 +377,8 @@ static void format_setting(struct input *in, const char *schema, char *sql, size
   static const unsigned headers[] = {0, 16, 24, 32, 48, 4096};
   unsigned char salt[16];
   char salt_hex[33];
+  unsigned char random_data[24];
+  char random_hex[49];
   unsigned choice = u8(in);
   enum setting setting = major < 5 ? settings_4[choice % (sizeof settings_4 / sizeof *settings_4)]
                                    : settings_5[choice % (sizeof settings_5 / sizeof *settings_5)];
@@ -424,6 +431,16 @@ static void format_setting(struct input *in, const char *schema, char *sql, size
     snprintf(sql, cap, "PRAGMA \"%s\".cipher_hmac_fast_kdf = %s%s%s%s", schema, value,
              value == on_off[0] ? "; PRAGMA \"" : "", value == on_off[0] ? schema : "",
              value == on_off[0] ? "\".cipher_use_hmac = ON" : "");
+    break;
+  }
+  case SET_ADD_RANDOM: {
+    /* sqlcipher_codec_add_random requires exactly x'<even-length-hex>', with no surrounding text: a bare pragma
+       value in this exact shape is unlikely to ever come from mutating raw SQL text, unlike every other codec
+       setting above, whose SQL keeps working regardless of the specific number or string it mutates in. */
+    unsigned len = u8(in) % (sizeof random_data + 1);
+    for (unsigned i = 0; i < len; i++) random_data[i] = (unsigned char)u8(in);
+    hex(random_hex, random_data, len);
+    snprintf(sql, cap, "PRAGMA \"%s\".cipher_add_random = \"x'%s'\"", schema, random_hex);
     break;
   }
   }
@@ -572,6 +589,15 @@ static void op_key(struct input *in, int rekey) {
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
   if (!db || (touched && !rekey)) return;
   int rc = apply_key(db, "main", &key, rekey, NULL);
+  /* cipher_migrate needs the connection's underived passphrase, which SQLCipher discards after the first real
+     page access derives the actual key, so it only ever has a chance right here, before anything else, the
+     key_verified read below included, touches the connection: op_statement's own "PRAGMA cipher_migrate" entry
+     can only ever hit the immediate SQLITE_MISUSE bailout once picked among ~23 other choices with no ordering
+     guarantee relative to the key. */
+  if (!rekey && rc == SQLITE_OK && !key.passphrase && key.migrate) {
+    run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
+    touched = 1;
+  }
   /* A failed rekey (SQLITE_MISUSE on a database no key ever reached) leaves the file exactly as it was: nothing to
      expect encryption of. rekey_v2 retroactively re-encrypts every existing page as part of the same call, so its
      own SQLITE_OK is enough on its own; key_v2 does not, so a read has to confirm this key actually matches
