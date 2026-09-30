@@ -22,22 +22,30 @@
 
 static const char *const files[SCRIPT_FILES] = {"main.db", "other.db", "third.db"};
 
+/* Every value here is permanent once assigned: script_run masks the selector byte with OP_MASK and dispatches on
+   the numeric value directly, not on position, so a saved crash or corpus entry keeps meaning exactly what it
+   meant when it was written even as new ops are added. Adding one means picking the next free number below
+   OP_MASK + 1 and appending it here; it never means inserting into or renumbering the existing list. A selector
+   byte that masks to a number with no assigned op here is a no-op: growing OP_COUNT is the only way an old input's
+   behaviour can change, by filling in a slot that used to be a no-op, and only for the specific byte values that
+   land on that exact slot, not for every byte the way changing a modulus would. */
+#define OP_MASK 0x1f
 enum op {
-  OP_OPEN,
-  OP_REOPEN,
-  OP_CLOSE,
-  OP_KEY,
-  OP_REKEY,
-  OP_SETTING,
-  OP_STATEMENT,
-  OP_PRAGMA,
-  OP_ATTACH,
-  OP_BACKUP,
-  OP_DAMAGE,
-  OP_READ,
-  OP_CACHE_RACE,
-  OP_RAW_SQL,
-  OP_COUNT,
+  OP_OPEN = 0,
+  OP_REOPEN = 1,
+  OP_CLOSE = 2,
+  OP_KEY = 3,
+  OP_REKEY = 4,
+  OP_SETTING = 5,
+  OP_STATEMENT = 6,
+  OP_PRAGMA = 7,
+  OP_ATTACH = 8,
+  OP_BACKUP = 9,
+  OP_DAMAGE = 10,
+  OP_READ = 11,
+  OP_CACHE_RACE = 12,
+  OP_RAW_SQL = 13,
+  OP_COUNT = 14,
 };
 
 enum step_kind { STEP_KEY, STEP_SETTING };
@@ -739,7 +747,8 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
   budget = SCRIPT_BUDGET;
   memset(recipes, 0, sizeof recipes);
   for (int n = 0; n < MAX_OPS && in->size; n++) {
-    unsigned opcode = u8(in) % ops;
+    unsigned opcode = u8(in) & OP_MASK;
+    if (opcode >= ops) continue; /* Reserved for a future op, or OP_RAW_SQL outside SCRIPT_WITH_RAW_SQL: no-op. */
     switch ((enum op)opcode) {
     case OP_OPEN: {
       int file = (int)(u8(in) % SCRIPT_FILES);
