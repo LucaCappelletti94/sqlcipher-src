@@ -1,5 +1,5 @@
 #!/bin/sh -e
-# Runs SQLCipher's own test suite against the shipped wrapper, so our libtomcrypt switch set meets SQLCipher's expectations.
+# Runs SQLCipher's own test suite against the shipped sources in sqlite-wasm-rs's wrapper, so its libtomcrypt switch set meets SQLCipher's expectations.
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -24,6 +24,12 @@ if [ -n "${SANITIZE:-}" ]; then
     export ASAN_OPTIONS UBSAN_OPTIONS
 fi
 
+# The wrapper at the revision interop/web pins, as cargo resolves it.
+WRAPPER=$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT/interop/web/Cargo.toml" |
+    jq -r '.packages[] | select(.name == "sqlite-wasm-rs" and (.source | startswith("git+"))) | .manifest_path' |
+    xargs dirname)/shim/sqlcipher-wasm.c
+[ -f "$WRAPPER" ] || { echo "no sqlite-wasm-rs wrapper at $WRAPPER" >&2; exit 1; }
+
 trust_keys "$WORK"
 fetch_sqlcipher "$WORK"
 cd "$WORK/sqlcipher"
@@ -31,13 +37,13 @@ cd "$WORK/sqlcipher"
 CC="$CC" ./configure ${TCL_LIB:+--with-tcl="$TCL_LIB"} > configure.log
 make sqlite3.c > make.log
 # SQLCipher needs SQLITE_TEMP_STORE=2, which sqlite-wasm-rs sets on its own command line.
-printf '#define SQLITE_TEMP_STORE 2\n#include "%s/sqlcipher/sqlite3.c"\n' "$ROOT" > sqlite3.c
+printf '#define SQLITE_TEMP_STORE 2\n#include "%s"\n' "$WRAPPER" > sqlite3.c
 # SQLITE_HAS_CODEC stops every file skipping itself, SQLCIPHER_TEST enables the error pragmas, FTS5 is used by export tests.
-make testfixture CC="$CC" CFLAGS="$OPT -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
+make testfixture CC="$CC" CFLAGS="$OPT -I$ROOT/sqlcipher -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
     LDFLAGS="${SANITIZE:+$OPT}" > testfixture.log 2>&1
 
 nm testfixture | grep -q sqlcipher_wasm_extra_init ||
-    { echo "testfixture was not built from sqlcipher/sqlite3.c" >&2; exit 1; }
+    { echo "testfixture was not built from $WRAPPER" >&2; exit 1; }
 # A clean sanitizer run only counts if the binary is really instrumented.
 [ -z "${SANITIZE:-}" ] || { nm testfixture | grep -q __asan_report_load && nm testfixture | grep -q __ubsan_handle; } ||
     { echo "testfixture is not instrumented" >&2; exit 1; }

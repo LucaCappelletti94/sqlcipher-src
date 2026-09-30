@@ -115037,7 +115037,7 @@ end_of_export:
 #ifdef SQLCIPHER_CRYPTO_LIBTOMCRYPT
 /* #include "sqliteInt.h" */
 /* #include "sqlcipher.h" */
-#include "tomcrypt.h"
+#include <tomcrypt.h>
 
 #define FORTUNA_MAX_SZ 32
 static prng_state prng;

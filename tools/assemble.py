@@ -8,15 +8,11 @@ import sys
 
 sqlcipher, libtomcrypt, out = sys.argv[1:4]
 os.makedirs(out, exist_ok=True)
-# A file an upstream release drops must leave the crate, so only the hand-written wrapper survives.
+# A file an upstream release drops must leave the crate.
 for name in os.listdir(out):
-    if name != "sqlite3.c":
-        os.remove(os.path.join(out, name))
+    os.remove(os.path.join(out, name))
 
-# sqlite-wasm-rs puts only its libc shim on the include path, so tomcrypt headers are included by quote.
-ANGLED_TOMCRYPT = re.compile(r"#include <(tomcrypt[a-z_]*\.h)>")
-
-# wasm32 cannot hold a .fini_array section, and SQLCipher offers no switch to skip it.
+# wasm32 cannot hold a .fini_array section, and SQLCipher offers no switch to skip it until sqlcipher/sqlcipher#622 ships.
 FINI_BEFORE = '#else\nstatic void (*const sqlcipher_fini_func)(void) __attribute__((used, section(".fini_array"))) = sqlcipher_fini;\n#endif\n'
 FINI_AFTER = '#elif !defined(__wasm__)\nstatic void (*const sqlcipher_fini_func)(void) __attribute__((used, section(".fini_array"))) = sqlcipher_fini;\n#endif\n'
 
@@ -34,15 +30,14 @@ def write(path, text):
 amalgamation = read(os.path.join(sqlcipher, "sqlite3.c"))
 if amalgamation.count(FINI_BEFORE) != 1:
     sys.exit("SQLCipher's .fini_array registration moved, so the wasm guard needs updating")
-amalgamation = ANGLED_TOMCRYPT.sub(r'#include "\1"', amalgamation.replace(FINI_BEFORE, FINI_AFTER))
-write(os.path.join(out, "sqlcipher.c"), amalgamation)
+write(os.path.join(out, "sqlcipher.c"), amalgamation.replace(FINI_BEFORE, FINI_AFTER))
 for name in ("sqlite3.h", "sqlite3ext.h"):
     shutil.copy(os.path.join(sqlcipher, name), os.path.join(out, name))
 shutil.copy(os.path.join(sqlcipher, "LICENSE.md"), os.path.join(out, "LICENSE-sqlcipher"))
 
 src = os.path.join(libtomcrypt, "src")
 for header in glob.glob(os.path.join(src, "headers", "*.h")):
-    write(os.path.join(out, os.path.basename(header)), ANGLED_TOMCRYPT.sub(r'#include "\1"', read(header)))
+    shutil.copy(header, os.path.join(out, os.path.basename(header)))
 shutil.copy(os.path.join(libtomcrypt, "LICENSE"), os.path.join(out, "LICENSE-libtomcrypt"))
 
 sources = sorted(glob.glob(os.path.join(src, "**", "*.c"), recursive=True))

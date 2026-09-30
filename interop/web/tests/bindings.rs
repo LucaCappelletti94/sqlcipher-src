@@ -1,5 +1,5 @@
-//! The shipped bindings key, rekey and reject through `sqlite3_key` and `sqlite3_rekey`, with no `PRAGMA`.
-use interop_web::sqlcipher as ffi;
+//! `sqlite-wasm-rs`'s bindings key, rekey and reject through `sqlite3_key` and `sqlite3_rekey`, with no `PRAGMA`.
+use sqlite_wasm_rs as ffi;
 use sqlite_wasm_rs::vfs::memvfs::MemVfsUtil;
 use sqlite_wasm_rs::vfs::transfer::DbTransfer;
 use std::ffi::CString;

@@ -1,7 +1,7 @@
 [package]
 name = "sqlcipher-src"
 # SQLCipher X.Y.Z is (100X+Y).Z.n, where n counts our own republishes of that release.
-version = "419.0.4+sqlcipher-4.19.0-sqlite-3.53.4-libtomcrypt-1.18.2"
+version = "419.0.5+sqlcipher-4.19.0-sqlite-3.53.4-libtomcrypt-1.18.2"
 edition = "2021"
 rust-version = "1.81"
 description = "The SQLCipher amalgamation for native and wasm32 builds, with a libtomcrypt provider for targets without a system crypto library"

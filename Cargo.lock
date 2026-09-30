@@ -4,4 +4,4 @@ version = 3
 
 [[package]]
 name = "sqlcipher-src"
-version = "419.0.4+sqlcipher-4.19.0-sqlite-3.53.4-libtomcrypt-1.18.2"
+version = "419.0.5+sqlcipher-4.19.0-sqlite-3.53.4-libtomcrypt-1.18.2"
