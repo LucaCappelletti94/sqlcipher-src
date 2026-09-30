@@ -88,7 +88,7 @@ jobs:
           toolchain: stable
           targets: wasm32-unknown-unknown
           components: clippy
-      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: wasm-pack
       - run: ./interop/run.sh
@@ -120,7 +120,7 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
-      - uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: wasm-pack
       # These avoid Node's fs module, and sahpool needs a browser worker for OPFS.
