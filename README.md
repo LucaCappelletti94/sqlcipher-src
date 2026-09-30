@@ -9,7 +9,7 @@
 [![docs.rs](https://docs.rs/sqlcipher-src/badge.svg)](https://docs.rs/sqlcipher-src)
 [![license](https://img.shields.io/badge/license-MIT%20AND%20BSD--3--Clause%20AND%20blessing%20AND%20WTFPL-blue.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/blob/main/Cargo.toml)
 
-The [SQLCipher](https://github.com/sqlcipher/sqlcipher) amalgamation as C source for `-sys` crates, on native targets and on `wasm32-unknown-unknown` through [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs), where it adds the [libtomcrypt](https://github.com/libtom/libtomcrypt) crypto provider.
+The [SQLCipher](https://github.com/sqlcipher/sqlcipher) amalgamation and the [libtomcrypt](https://github.com/libtom/libtomcrypt) crypto provider as C source for `-sys` crates.
 
 Native builds compile `SOURCE_FILE` with their own crypto provider and flags:
 
@@ -19,17 +19,8 @@ assert!(dir.join(sqlcipher_src::SOURCE_FILE).is_file());
 assert!(dir.join(sqlcipher_src::HEADER_FILE).is_file());
 ```
 
-`sqlite-wasm-rs` 0.6 compiles `WASM_SOURCE_FILE` instead of plain SQLite when `SQLITE_WASM_RS_SOURCE_DIR` points at the same directory, set in the environment or in `[env]` of `.cargo/config.toml`:
+The `sqlcipher` feature of [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) builds from this crate for `wasm32-unknown-unknown`, pairing `SOURCE_FILE` with `libtomcrypt.c`.
 
-```sh
-export SQLITE_WASM_RS_SOURCE_DIR="$(cargo metadata --format-version 1 \
-  | jq -r '.packages[] | select(.name == "sqlcipher-src") | .manifest_path' \
-  | xargs dirname)/sqlcipher"
-cargo build --target wasm32-unknown-unknown
-```
+The sources are generated from signed SQLCipher and libtomcrypt releases by `upgrade.sh` and ship as released, except that `SOURCE_FILE` skips SQLCipher's `.fini_array` finalizer on `__wasm__`, which cannot hold that section, until [sqlcipher/sqlcipher#622](https://github.com/sqlcipher/sqlcipher/pull/622) is released. CI runs SQLCipher's and `rusqlite`'s SQLCipher tests on them natively, and checks through `sqlite-wasm-rs` that files written natively and in Node, Chrome and Firefox open on both sides.
 
-Shared-memory builds (`+atomics`) also need `-mbulk-memory` in `CFLAGS_wasm32_unknown_unknown`.
-
-The sources are generated from signed SQLCipher and libtomcrypt releases by `upgrade.sh`. CI runs `rusqlite`'s SQLCipher tests on them natively, and checks that files written natively and in Node, Chrome and Firefox open on both sides.
-
-The wrapper is MIT, SQLCipher is BSD-3-Clause, SQLite is public domain, and libtomcrypt is public domain or WTFPL.
+The crate is MIT, SQLCipher is BSD-3-Clause, SQLite is public domain, and libtomcrypt is public domain or WTFPL.

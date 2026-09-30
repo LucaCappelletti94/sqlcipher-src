@@ -8,7 +8,7 @@ publish = false
 description = "Runs SQLCipher built from this crate inside sqlite-wasm-rs under Node.js"
 
 [dependencies]
-sqlite-wasm-rs = { version = "0.6", features = ["wasm-bindgen"] }
+sqlite-wasm-rs = { version = "0.6", features = ["wasm-bindgen", "sqlcipher"] }
 wasm-bindgen = "0.2"
 
 [dev-dependencies]
@@ -31,3 +31,7 @@ allow_attributes_without_reason = "warn"
 
 # Standalone, so the root crate never adopts it as a member.
 [workspace]
+
+# The one pin of sqlite-wasm-rs's SQLCipher wrapper, which suite/run.sh builds too. Patched, so the git-pinned rusqlite shares it.
+[patch.crates-io]
+sqlite-wasm-rs = { git = "https://github.com/LucaCappelletti94/sqlite-wasm-rs", rev = "4915d509209a2c229c4d0fded5a43007e17aea9b" }

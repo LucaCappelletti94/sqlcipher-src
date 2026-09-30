@@ -2,7 +2,6 @@
 
 use sqlcipher_src::{
     source_dir, HEADER_FILE, LIBTOMCRYPT_VERSION, SOURCE_FILE, SQLCIPHER_VERSION, SQLITE_VERSION,
-    WASM_BINDINGS_FILE, WASM_SOURCE_FILE,
 };
 
 fn read(file: &str) -> String {
@@ -12,9 +11,7 @@ fn read(file: &str) -> String {
 #[test]
 fn every_generated_file_is_present() {
     for file in [
-        WASM_SOURCE_FILE,
         HEADER_FILE,
-        WASM_BINDINGS_FILE,
         SOURCE_FILE,
         "libtomcrypt.c",
         "tomcrypt.h",
@@ -36,7 +33,7 @@ fn checksums_cover_every_generated_file() {
     let mut present: Vec<String> = std::fs::read_dir(source_dir())
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name != "SHA256SUMS" && name != WASM_SOURCE_FILE)
+        .filter(|name| name != "SHA256SUMS")
         .collect();
     present.sort();
     assert_eq!(listed, present);
@@ -78,6 +75,40 @@ fn crate_version_encodes_the_release() {
     assert_eq!(metadata, format!("sqlcipher-{SQLCIPHER_VERSION}-sqlite-{SQLITE_VERSION}-libtomcrypt-{LIBTOMCRYPT_VERSION}"));
 }
 
+fn shipped_files() -> Vec<String> {
+    std::fs::read_dir(source_dir())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect()
+}
+
+fn has_extension(name: &str, extension: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        == Some(extension)
+}
+
+#[test]
+fn only_upstream_sources_ship() {
+    let tomcrypt = read("libtomcrypt.c");
+    for name in shipped_files() {
+        let source = has_extension(&name, "c") || has_extension(&name, "h");
+        assert!(
+            source || name.starts_with("LICENSE-") || name == "SHA256SUMS",
+            "{name} is not an upstream source"
+        );
+        // The only C files are the two amalgamations and the tables libtomcrypt includes.
+        assert!(
+            !has_extension(&name, "c")
+                || name == SOURCE_FILE
+                || name == "libtomcrypt.c"
+                || tomcrypt.contains(&format!("#include \"{name}\"")),
+            "{name} is not SQLCipher or libtomcrypt"
+        );
+    }
+}
+
 #[test]
 fn sqlcipher_finalizer_is_skipped_on_wasm() {
     let sqlcipher = read(SOURCE_FILE);
@@ -90,75 +121,22 @@ fn sqlcipher_finalizer_is_skipped_on_wasm() {
 }
 
 #[test]
-fn tomcrypt_headers_are_included_by_quote() {
-    let sources: Vec<String> = std::fs::read_dir(source_dir())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .filter(|name| {
-            matches!(
-                std::path::Path::new(name)
-                    .extension()
-                    .and_then(|e| e.to_str()),
-                Some("c" | "h")
-            )
-        })
-        .collect();
-    assert!(sources
-        .iter()
-        .any(|name| name == "tomcrypt_private.h" || name == "tomcrypt_cipher.h"));
-    for file in &sources {
-        assert!(
-            !read(file).contains("#include <tomcrypt"),
-            "{file} still includes tomcrypt by angle brackets"
-        );
-    }
-}
-
-#[test]
-fn wasm_wrapper_keeps_its_load_bearing_settings() {
-    let wrapper = read(WASM_SOURCE_FILE);
-    for setting in [
-        "#define SQLITE_HAS_CODEC 1",
-        "#define SQLCIPHER_CRYPTO_LIBTOMCRYPT 1",
-        "#define SQLITE_EXTRA_INIT sqlcipher_wasm_extra_init",
-        "#define SQLITE_EXTRA_SHUTDOWN sqlcipher_extra_shutdown",
-        "#define LTC_PRNG_ENABLE_LTC_RNG",
-        "#define XCLOCK sqlcipher_wasm_no_clock",
-        "ltc_rng = sqlcipher_wasm_rng;",
-        "if (getentropy(out, len) != 0) abort();",
-    ] {
-        assert!(wrapper.contains(setting), "wrapper lost `{setting}`");
-    }
-}
-
-#[test]
-fn bindings_declare_the_codec_api_for_the_shipped_sqlite() {
-    let bindings = read(WASM_BINDINGS_FILE);
-    for function in ["sqlite3_key", "sqlite3_rekey"] {
-        assert!(
-            bindings.contains(&format!("pub fn {function}(")),
-            "bindings lack `{function}`, so `SQLITE_HAS_CODEC` was not set"
-        );
-    }
-    assert!(bindings.contains(&format!(
-        "pub const SQLITE_VERSION: &::core::ffi::CStr = c\"{SQLITE_VERSION}\";"
-    )));
-}
-
-#[test]
-fn libc_stubs_yield_to_sqlite_wasm_rs() {
-    let wrapper = read(WASM_SOURCE_FILE);
-    for name in ["stdout", "stderr", "fopen", "fprintf", "rename", "atexit"] {
-        let definition = wrapper
+fn the_finalizer_guard_is_the_only_local_change() {
+    for name in shipped_files() {
+        let wasm = read(&name)
             .lines()
-            .find(|l| {
-                !l.starts_with("/*")
-                    && (l.contains(&format!("{name}(")) || l.contains(&format!("{name} = 0;")))
-            })
-            .unwrap_or_else(|| panic!("no stub for `{name}`"));
+            .filter(|l| l.contains("__wasm__"))
+            .count();
+        let expected = usize::from(name == SOURCE_FILE);
+        assert_eq!(wasm, expected, "{name} carries a local wasm change");
+    }
+    // SQLCipher and libtomcrypt reach libtomcrypt's headers through the include path, as released.
+    assert!(read(SOURCE_FILE).contains("\n#include <tomcrypt.h>\n"));
+    assert!(read("tomcrypt.h").contains("\n#include <tomcrypt_cfg.h>\n"));
+    for name in shipped_files().iter().filter(|n| has_extension(n, "h")) {
         assert!(
-            definition.starts_with("__attribute__((weak)) "),
-            "`{name}` would clash with a sqlite-wasm-rs definition: {definition}"
+            !read(name).contains("#include \"tomcrypt"),
+            "{name} includes a tomcrypt header by quote, unlike the release"
         );
     }
 }

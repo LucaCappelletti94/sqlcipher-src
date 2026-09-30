@@ -32,6 +32,7 @@ sed -i -E \
     src/lib.rs
 sed -i -E "0,/^version = \".*\"$/s//version = \"${CRATE_VERSION}\"/" Cargo.toml
 cargo update --quiet -p sqlcipher-src
-cargo update --quiet --manifest-path interop/web/Cargo.toml -p sqlcipher-src
+# interop/web also locks the sqlcipher-src release sqlite-wasm-rs depends on, so only the path copy is named.
+cargo update --quiet --manifest-path interop/web/Cargo.toml -p "path+file://$(pwd)#sqlcipher-src"
 
 echo "Pinned SQLCipher ${VERSION} on SQLite ${SQLITE_VERSION} as ${CRATE_VERSION}"
