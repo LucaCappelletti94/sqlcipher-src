@@ -128,13 +128,17 @@ spawn release openssl openssl.c -iquote ../sqlcipher
 # Plain SQLite from the same amalgamation, the reference keyed_file compares every line against.
 spawn release plain plain.c -iquote ../sqlcipher
 
-# The fetched lines, which 5.x only builds with SQLITE_DIRECT_OVERFLOW_READ off.
-for variant in beta prerelease; do
-    fetched=(-iquote "$SOURCES/$variant" -I ../sqlcipher -DSQLITE_DIRECT_OVERFLOW_READ=0)
-    spawn "$variant" libtomcrypt fetched_libtomcrypt.c "${fetched[@]}"
-    spawn "$variant" libtomcrypt_system_heap fetched_libtomcrypt.c "${fetched[@]}" "${system_heap[@]}"
-    spawn "$variant" openssl openssl.c "${fetched[@]}"
-done
+# The fetched lines, which 5.x only builds with SQLITE_DIRECT_OVERFLOW_READ off. Skipped when FUZZ_RELEASE_ONLY is
+# set, for PR fuzzing's short budget: a beta or prerelease crash still needs an upstream fix regardless of how
+# quickly a PR run finds it, so the fast path only needs the shipped release.
+if [ -z "${FUZZ_RELEASE_ONLY:-}" ]; then
+    for variant in beta prerelease; do
+        fetched=(-iquote "$SOURCES/$variant" -I ../sqlcipher -DSQLITE_DIRECT_OVERFLOW_READ=0)
+        spawn "$variant" libtomcrypt fetched_libtomcrypt.c "${fetched[@]}"
+        spawn "$variant" libtomcrypt_system_heap fetched_libtomcrypt.c "${fetched[@]}" "${system_heap[@]}"
+        spawn "$variant" openssl openssl.c "${fetched[@]}"
+    done
+fi
 wait
 [ ! -e "$WORK/failed" ] || { echo "a SQLCipher library failed to compile" >&2; exit 1; }
 
@@ -142,5 +146,7 @@ wait
 file_units=("$WORK/app.o" "$WORK/rawfile.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o")
 
 targets release ""
-targets beta _beta
-targets prerelease _prerelease
+if [ -z "${FUZZ_RELEASE_ONLY:-}" ]; then
+    targets beta _beta
+    targets prerelease _prerelease
+fi

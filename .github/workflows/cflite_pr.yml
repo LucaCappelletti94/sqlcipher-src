@@ -20,6 +20,10 @@ jobs:
         sanitizer: [address, undefined]
     steps:
       - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        env:
+          # Keeps the PR check to the shipped release: a beta or prerelease crash still needs an upstream fix
+          # regardless of how quickly a PR run finds it, and batch/continuous fuzzing already cover both.
+          FUZZ_RELEASE_ONLY: "1"
         with:
           language: c
           github-token: ${{ secrets.GITHUB_TOKEN }}
