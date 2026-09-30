@@ -9,6 +9,7 @@
 #include "random.h"
 #include "script.h"
 #include "tamper.h"
+#include "uniqueness.h"
 
 extern const struct fuzz_sqlite FUZZ_LIBTOMCRYPT;
 extern const struct fuzz_sqlite FUZZ_OPENSSL;
@@ -29,6 +30,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   memvfs_reset();
   tamper_reset_all();
   confidentiality_reset();
+  uniqueness_reset();
   fuzz_random_reset();
   script_reset(writer);
   script_reset(reader);

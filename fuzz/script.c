@@ -9,6 +9,7 @@
 #include "libstate.h"
 #include "memvfs.h"
 #include "tamper.h"
+#include "uniqueness.h"
 #include "script.h"
 
 #define MAX_OPS 64
@@ -193,7 +194,10 @@ static sqlite3 *open_file(int file, int create) {
 }
 
 static void close_db(void) {
-  if (db) lib->close_v2(db);
+  if (db) {
+    uniqueness_check(lib, db, "main", db_file, files[db_file]);
+    lib->close_v2(db);
+  }
   db = NULL;
   db_file = -1;
   touched = 0;
@@ -294,6 +298,10 @@ static int run_trusted(sqlite3 *handle, const char *sql, struct dump *out) {
   return rc;
 }
 
+/* read_key's key->len for its 48-byte raw-hex form (x'<64 hex digits key><32 hex digits salt>'): 3 wrapper bytes
+   (x, both quotes) plus 96 hex digits. The trailing 32 hex digits are an explicit salt SQLCipher reads straight
+   out of the key string, the documented alternative to PRAGMA cipher_salt. */
+#define RAW_KEY_SALT_LEN (3 + 2 * 48)
 static void read_key(struct input *in, struct key *key) {
   unsigned form = u8(in);
   memset(key, 0, sizeof *key);
@@ -372,7 +380,7 @@ static const enum setting settings_5[] = {
 };
 
 /* One codec pragma on schema, followed by a cheap kdf_iter wherever the pragma would restore an expensive one. */
-static void format_setting(struct input *in, const char *schema, char *sql, size_t cap) {
+static enum setting format_setting(struct input *in, const char *schema, char *sql, size_t cap) {
   static const char *const on_off[] = {"ON", "OFF"};
   static const char *const hmacs[] = {"HMAC_SHA1", "HMAC_SHA256", "HMAC_SHA512", "HMAC_MD5"};
   static const char *const kdfs[] = {"PBKDF2_HMAC_SHA1", "PBKDF2_HMAC_SHA256", "PBKDF2_HMAC_SHA512", "SCRYPT"};
@@ -448,12 +456,14 @@ static void format_setting(struct input *in, const char *schema, char *sql, size
     break;
   }
   }
+  return setting;
 }
 
-static void apply_setting(sqlite3 *handle, const char *schema, struct input *in, struct dump *out) {
+static enum setting apply_setting(sqlite3 *handle, const char *schema, struct input *in, struct dump *out) {
   char sql[160];
-  format_setting(in, schema, sql, sizeof sql);
+  enum setting setting = format_setting(in, schema, sql, sizeof sql);
   run_trusted(handle, sql, out);
+  return setting;
 }
 
 static void record(int file, enum step_kind kind, const uint8_t *start, const uint8_t *end) {
@@ -610,7 +620,9 @@ static void op_key(struct input *in, int rekey) {
      above), not silently. A successful rekey to an empty key removes the codec and writes the file back out in
      plaintext just as definitively as a non-empty key encrypts it, so it has to clear expect_encrypted the same
      way opening or attaching the file already does, not leave the prior key's mark standing over content the
-     empty rekey just decrypted itself. */
+     empty rekey just decrypted itself. read_key's 48-byte raw form (key.len == RAW_KEY_SALT_LEN) embeds an
+     explicit salt in its own trailing hex digits, the documented alternative to PRAGMA cipher_salt: it is exempt
+     from the salt check the same way. */
   if (!rekey && rc == SQLITE_OK) {
     unsigned long long before_hash = tamper_hash_file(files[db_file]);
     int vrc = key_verified(db, "main");
@@ -621,15 +633,17 @@ static void op_key(struct input *in, int rekey) {
   } else if (rekey && rc == SQLITE_OK && key.len == 0) {
     confidentiality_forget_file(db_file);
   }
+  if (rc == SQLITE_OK && key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(db_file);
   record(db_file, STEP_KEY, start, in->data);
 }
 
 static void op_setting(struct input *in) {
   const uint8_t *start = in->data;
   char sql[160];
-  format_setting(in, "main", sql, sizeof sql);
+  enum setting setting = format_setting(in, "main", sql, sizeof sql);
   if (!db || touched) return; /* L6 */
   run_trusted(db, sql, NULL);
+  if (setting == SET_SALT) uniqueness_note_explicit_salt(db_file);
   record(db_file, STEP_SETTING, start, in->data);
   if (header_mismatch(db, db_file)) close_db(); /* L8 */
 }
@@ -670,15 +684,18 @@ static void op_attach(struct input *in) {
   int vrc = key_verified(db, "aux");
   tamper_check_wrong_key(vrc, before_hash, files[file]);
   if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
+  if (key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
   for (unsigned i = 0; i < settings; i++) {
     const uint8_t *setting = in->data;
-    apply_setting(db, "aux", in, NULL);
+    enum setting chosen = apply_setting(db, "aux", in, NULL);
+    if (chosen == SET_SALT) uniqueness_note_explicit_salt(file);
     record(file, STEP_SETTING, setting, in->data);
   }
   run_trusted(db, PICK(in, moves), NULL);
+  uniqueness_check(lib, db, "aux", file, files[file]);
   run_trusted(db, "DETACH aux", NULL);
 }
 
@@ -706,8 +723,10 @@ static void op_backup(struct input *in) {
     tamper_check_wrong_key(vrc, before_hash, files[file]);
     if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
   }
+  if (rc == SQLITE_OK && key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
   record(file, STEP_KEY, start, in->data);
   if (known_backup_blocked(major, codec_page_size(db), codec_page_size(dest))) {
+    uniqueness_check(lib, dest, "main", file, files[file]);
     lib->close_v2(dest);
     return;
   }
@@ -716,6 +735,7 @@ static void op_backup(struct input *in) {
     lib->backup_step(backup, -1);
     lib->backup_finish(backup);
   }
+  uniqueness_check(lib, dest, "main", file, files[file]);
   lib->close_v2(dest);
 }
 
@@ -753,12 +773,16 @@ static void op_damage(struct input *in) {
     if (size) {
       memvfs_flip(index, at, (unsigned char)mask);
       tamper_flip(file_of_memvfs(index), memvfs_name(index), at, (unsigned char)mask);
+      uniqueness_note_damage(file_of_memvfs(index));
     }
   } else if (kind == 1) {
     memvfs_truncate(index, at);
   } else {
     memvfs_overwrite(index, at, chunk.data, chunk.size);
-    if (chunk.size) tamper_note(file_of_memvfs(index), memvfs_name(index), at, len);
+    if (chunk.size) {
+      tamper_note(file_of_memvfs(index), memvfs_name(index), at, len);
+      uniqueness_note_damage(file_of_memvfs(index));
+    }
   }
 }
 
@@ -795,6 +819,7 @@ static void op_cache_race(struct input *in) {
   }
   memvfs_flip(index, at, mask);
   tamper_flip(file_of_memvfs(index), memvfs_name(index), at, mask);
+  uniqueness_note_damage(file_of_memvfs(index));
   if (kind == 0) {
     const uint8_t *start = in->data;
     struct key key;
