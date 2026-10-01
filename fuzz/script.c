@@ -5,6 +5,7 @@
 #include <strings.h>
 
 #include "confidentiality.h"
+#include "fault.h"
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
@@ -49,7 +50,8 @@ enum op {
   OP_CACHE_RACE = 12,
   OP_RAW_SQL = 13,
   OP_CANARY = 14,
-  OP_COUNT = 15,
+  OP_FAULT_TXN = 15,
+  OP_COUNT = 16,
 };
 
 enum step_kind { STEP_KEY, STEP_REKEY, STEP_SETTING };
@@ -821,6 +823,68 @@ static void op_canary(struct input *in) {
   confidentiality_plant(lib, db);
 }
 
+/* Arms one fault (a short read, a short write, running out of space on write, a failed fsync, or a failed
+   allocation), then writes inside an explicit transaction and commits, testing the property the plan states for
+   this oracle directly: reopening afterward shows exactly the pre-transaction state, when the fault made the
+   transaction fail, or exactly the post-transaction state, when it committed despite the fault, never a partial
+   page. Reopens right here, the same way OP_REOPEN does, rather than leaving that to whichever later op happens
+   to reopen this file, so every fault this op ever arms gets its own outcome checked. */
+static void op_fault_txn(struct input *in) {
+  static const enum fault_kind kinds[] = {FAULT_SHORT_READ, FAULT_SHORT_WRITE, FAULT_ENOSPC, FAULT_FSYNC,
+                                           FAULT_ALLOC};
+  /* L12: this op's own BEGIN IMMEDIATE inside an already-open transaction always fails for that unrelated
+     reason regardless of whatever fault gets armed, leaving an empty outer transaction whose own later COMMIT
+     has read past a main page-cache buffer sized for a different page than an attached schema's, confirmed with
+     an attached schema's cipher_page_size differing from main's own; not narrowed further than the general
+     condition that made every attempt meaningless anyway. */
+  if (!db || !lib->get_autocommit(db)) return;
+  touched = 1;
+  enum fault_kind kind = kinds[u8(in) % (sizeof kinds / sizeof *kinds)];
+  unsigned countdown = u8(in);
+  unsigned blob = u16(in) % (MAX_BLOB + 1);
+  fault_arm(kind, countdown);
+  int rc = run_trusted(db, "BEGIN IMMEDIATE", NULL);
+  if (rc == SQLITE_OK) rc = run_trusted(db, "CREATE TABLE IF NOT EXISTS t(a INTEGER PRIMARY KEY, b BLOB, c TEXT)", NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_stmt *stmt = NULL;
+    if (lib->prepare_v2(db, "INSERT INTO t(b, c) VALUES (randomblob(?1), ?3)", -1, &stmt, NULL) == SQLITE_OK) {
+      lib->bind_int64(stmt, 1, blob);
+      lib->bind_text(stmt, 3, "fault", -1, SQLITE_STATIC);
+      trusted = 1;
+      rc = drain(stmt, NULL);
+      trusted = 0;
+    } else {
+      rc = SQLITE_ERROR;
+    }
+  }
+  int commit_rc = run_trusted(db, "COMMIT", NULL);
+  fault_disarm();
+  int committed = rc == SQLITE_OK && commit_rc == SQLITE_OK;
+  const char *op_name;
+  if (committed) {
+    op_name = "fault-commit";
+  } else {
+    run_trusted(db, "ROLLBACK", NULL); /* Harmless if BEGIN itself never opened one. */
+    op_name = "fault-rollback";
+  }
+  int can_check = lib->get_autocommit(db);
+  if (can_check) model_snapshot(lib, db, "main", db_file);
+  int file = db_file;
+  close_db();
+  db = open_file(file, 0);
+  if (!db) {
+    if (can_check) model_discard();
+    return;
+  }
+  db_file = file;
+  if (replay(db, file, NULL)) { /* L8 */
+    close_db();
+    if (can_check) model_discard();
+    return;
+  }
+  if (can_check) model_check(lib, db, "main", file, files[file], op_name);
+}
+
 /* The script file index memvfs slot index names, or -1 for a file the script did not create (a temp or super-journal). */
 static int file_of_memvfs(int index) {
   const char *name = memvfs_name(index);
@@ -973,7 +1037,10 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       if (can_check) model_snapshot(lib, db, "main", file);
       close_db();
       db = open_file(file, 0);
-      if (!db) break;
+      if (!db) {
+        if (can_check) model_discard();
+        break;
+      }
       db_file = file;
       if (replay(db, file, NULL)) { /* L8 */
         close_db();
@@ -1026,6 +1093,9 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       break;
     case OP_CANARY:
       op_canary(in);
+      break;
+    case OP_FAULT_TXN:
+      op_fault_txn(in);
       break;
     case OP_COUNT:
       abort();

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "../sqlcipher/sqlite3.h"
+#include "fault.h"
 #include "memvfs.h"
 
 #define MAX_FILES 16
@@ -72,6 +73,14 @@ static int mem_read(sqlite3_file *file, void *out, int amount, sqlite3_int64 off
   struct mem_data *data = ((struct mem_file *)file)->data;
   long long have = offset < data->size ? data->size - offset : 0;
   if (have >= amount) {
+    /* A fault-injected short read despite the file genuinely holding enough bytes, fired after a real read would
+       have succeeded, so this specifically tests recovery from a bad read, not a real end-of-file. */
+    if (fault_fire_read()) {
+      long long short_amount = amount > 1 ? amount / 2 : 0;
+      memcpy(out, data->bytes + offset, (size_t)short_amount);
+      memset((unsigned char *)out + short_amount, 0, (size_t)(amount - short_amount));
+      return SQLITE_IOERR_SHORT_READ;
+    }
     memcpy(out, data->bytes + offset, (size_t)amount);
     return SQLITE_OK;
   }
@@ -82,9 +91,16 @@ static int mem_read(sqlite3_file *file, void *out, int amount, sqlite3_int64 off
 
 static int mem_write(sqlite3_file *file, const void *in, int amount, sqlite3_int64 offset) {
   struct mem_data *data = ((struct mem_file *)file)->data;
+  enum fault_kind fault = fault_fire_write();
+  if (fault == FAULT_ENOSPC) return SQLITE_FULL;
   long long end = offset + amount;
   int rc = grow(data, end);
   if (rc != SQLITE_OK) return rc;
+  if (fault == FAULT_SHORT_WRITE) {
+    long long short_amount = amount > 1 ? amount / 2 : 0;
+    memcpy(data->bytes + offset, in, (size_t)short_amount);
+    return SQLITE_IOERR_WRITE;
+  }
   memcpy(data->bytes + offset, in, (size_t)amount);
   return SQLITE_OK;
 }
@@ -98,6 +114,7 @@ static int mem_truncate(sqlite3_file *file, sqlite3_int64 size) {
 static int mem_sync(sqlite3_file *file, int flags) {
   (void)file;
   (void)flags;
+  if (fault_fire_sync()) return SQLITE_IOERR_FSYNC;
   return SQLITE_OK;
 }
 

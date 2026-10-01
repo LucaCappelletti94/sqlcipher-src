@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "confidentiality.h"
+#include "fault.h"
 #include "memvfs.h"
 #include "model.h"
 #include "random.h"
@@ -14,6 +15,14 @@
 
 extern const struct fuzz_sqlite FUZZ_LIBTOMCRYPT;
 extern const struct fuzz_sqlite FUZZ_OPENSSL;
+
+int LLVMFuzzerInitialize(int *argc, char ***argv) {
+  (void)argc;
+  (void)argv;
+  fault_install(&FUZZ_LIBTOMCRYPT);
+  fault_install(&FUZZ_OPENSSL);
+  return 0;
+}
 
 static void report(int file, const struct dump *writer, const struct dump *reader, const char *writer_name,
                    const char *reader_name) {
@@ -33,6 +42,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   confidentiality_reset();
   uniqueness_reset();
   model_reset();
+  fault_reset();
   fuzz_random_reset();
   script_reset(writer);
   script_reset(reader);
