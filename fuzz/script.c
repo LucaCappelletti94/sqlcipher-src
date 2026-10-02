@@ -96,6 +96,19 @@ static struct recipe recipes[SCRIPT_FILES];
    already wrote, export included, persists in the file underneath regardless, so a later reopen's replay is not
    this module's finding to make once that has ever happened, whatever the recipe it discarded looked like. */
 static int ever_db_file[SCRIPT_FILES];
+/* Whether file has ever gone through an operation differential_plain's own comparison cannot trust: sqlcipher_export
+   (the function itself does not exist on a provider with no codec at all, so content it moved has no plain-SQLite
+   equivalent to compare against), a rekey that was the very first key-related step for the file (which may have
+   retroactively re-encrypted content a canary or statement already wrote in plaintext, something replay's own
+   reconstruction has no faithful way to redo), or a backup destination (backup_step's own page-copy write path is
+   not a normal key_v2-then-SQL flow replay reconstructs faithfully either). Despite the name, every one of these
+   is the same "not this comparison's finding to make" signal, so one shared array covers all three. */
+static int export_touched[SCRIPT_FILES];
+/* Whether OP_FAULT_TXN ever ran against file, for differential_plain: the same countdown lands at a wildly
+   different logical I/O moment on a codec connection, which reads and writes many times per logical operation,
+   than on one with no codec at all, so a fault armed here can legitimately make the two sides diverge in ways
+   that are not a cipher-vs-plain behavioural difference. */
+static int fault_touched[SCRIPT_FILES];
 
 static unsigned u8(struct input *in) {
   if (!in->size) return 0;
@@ -335,6 +348,7 @@ static void read_key(struct input *in, struct key *key) {
 static int apply_key(sqlite3 *handle, const char *schema, const struct key *key, int rekey, struct dump *out) {
   char sql[96];
   if (rekey) {
+    if (!lib->rekey_v2) return SQLITE_OK; /* A provider with no codec (plain SQLite) has nothing to (re)key. */
     if (major < 5) {
       snprintf(sql, sizeof sql, "PRAGMA \"%s\".rekey_kdf_iter = %d", schema, key->kdf_iter);
       run_trusted(handle, sql, out);
@@ -343,6 +357,10 @@ static int apply_key(sqlite3 *handle, const char *schema, const struct key *key,
     dump_code(out, rc);
     return rc;
   }
+  if (!lib->key_v2 || key->len == 0) return SQLITE_OK; /* No key means no encryption, the same as never calling
+                                                           key_v2 at all; calling it anyway with a zero-length key
+                                                           does not reproduce that, so a later replay reapplying
+                                                           a recorded empty-key step must skip it the same way. */
   int rc = lib->key_v2(handle, schema, key->bytes, key->len);
   dump_code(out, rc);
   snprintf(sql, sizeof sql, "PRAGMA \"%s\".kdf_iter = %d", schema, key->kdf_iter);
@@ -483,6 +501,18 @@ static void record(int file, enum step_kind kind, const uint8_t *start, const ui
   recipe->count++;
 }
 
+/* Whether file's recipe already has a key or rekey step recorded, a setting alone does not count: used to tell
+   a rekey that is genuinely the first ever key-related operation for this file (rekey_v2 encrypting a fresh,
+   unkeyed connection in place, which replay must reconstruct via key_v2, not rekey_v2) from one that follows an
+   earlier key or rekey. */
+static int has_key_step(int file) {
+  const struct recipe *recipe = &recipes[file];
+  for (int i = 0; i < recipe->count; i++) {
+    if (recipe->steps[i].kind == STEP_KEY || recipe->steps[i].kind == STEP_REKEY) return 1;
+  }
+  return 0;
+}
+
 /* Returns nonzero when either the file's plaintext header disagrees with what was replayed (L8) or a key step
    itself failed to reapply: replay never replays the content writes between two key events, only the key and
    setting pragmas, so a passphrase key's KDF iteration count can still legitimately be pending, not yet locked
@@ -621,8 +651,10 @@ static void op_key(struct input *in, int rekey) {
   const uint8_t *start = in->data;
   struct key key;
   read_key(in, &key);
-  /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
-  if (!db || (touched && !rekey)) return;
+  /* L6: a key applied after the connection touched the file is position D and corrupts memory. A provider with
+     no codec at all (plain SQLite, differential_plain's comparison side) has nothing to key, record or mark:
+     every oracle below exists to check codec behaviour that provider simply does not have. */
+  if (!db || (touched && !rekey) || !lib->key_v2) return;
   if (rekey) model_snapshot(lib, db, "main", db_file);
   int rc = apply_key(db, "main", &key, rekey, NULL);
   if (rekey) {
@@ -674,6 +706,17 @@ static void op_key(struct input *in, int rekey) {
     confidentiality_forget_file(db_file);
   }
   if (rc == SQLITE_OK && key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(db_file);
+  /* Any rekey at all, not just the very first key-related step for this file, risks the same class of gap: its
+     own retroactive re-encryption of whatever the connection already had, successful or not, does not reliably
+     reconstruct the same way through replay on a later reopen, which can desync db_file itself between this run
+     and a provider with no codec (where the same bytes always succeed trivially), cascading into any later op
+     that touches another file through this same connection. A first-ever plain key carries the narrower version
+     of the same risk, meeting content an earlier unkeyed session already wrote. Marks every file export_touched-
+     style exempt from differential_plain's own comparison for the rest of the run, not just this one, rather
+     than trying to track the exact cascade. */
+  if (rekey || !has_key_step(db_file)) {
+    for (int i = 0; i < SCRIPT_FILES; i++) export_touched[i] = 1;
+  }
   record(db_file, rekey ? STEP_REKEY : STEP_KEY, start, in->data);
 }
 
@@ -702,6 +745,12 @@ static void op_attach(struct input *in) {
   unsigned settings = u8(in) % 3;
   if (!db) return;
   touched = 1;
+  /* ATTACH's own KEY clause, kdf_iter pragma and sqlcipher_export moves are all cipher-specific, with enough
+     surface (the attached schema's own key semantics, move_idx 0/1's retroactive content copy) that distinguishing
+     exactly which part of this op risks a replay-fidelity gap keeps finding new variants. Marks every file
+     export_touched-style exempt from differential_plain's own comparison for the rest of the run whenever this
+     op runs at all, the same broad safety net op_key's own rekey path uses. */
+  for (int i = 0; i < SCRIPT_FILES; i++) export_touched[i] = 1;
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
   /* Each ATTACH targeting file is its own, independent keying event, so a prior attach's expectation for it,
      possibly with a completely different key, must not carry over. */
@@ -711,23 +760,36 @@ static void op_attach(struct input *in) {
   recipes[file].passphrase = key.passphrase;
   record(file, STEP_KEY, start, key_end);
   sqlite3_stmt *stmt = NULL;
-  if (lib->prepare_v2(db, "ATTACH ?1 AS aux KEY ?2", -1, &stmt, NULL) != SQLITE_OK) return;
-  lib->bind_text(stmt, 1, files[file], -1, SQLITE_STATIC);
-  lib->bind_blob(stmt, 2, key.bytes, key.len, SQLITE_TRANSIENT);
+  /* A provider with no codec at all (plain SQLite) does not recognize the KEY clause SQLCipher adds to ATTACH's
+     own grammar at all, so the same file this op reaches on the cipher side would otherwise never even get
+     created on that side; falls back to a plain ATTACH instead, so the attached file's own content still exists
+     to compare, skipping only the key-verification and oracle-marking block below that makes no sense without a
+     codec. */
+  int keyless = !lib->key_v2;
+  if (keyless) {
+    if (lib->prepare_v2(db, "ATTACH ?1 AS aux", -1, &stmt, NULL) != SQLITE_OK) return;
+    lib->bind_text(stmt, 1, files[file], -1, SQLITE_STATIC);
+  } else {
+    if (lib->prepare_v2(db, "ATTACH ?1 AS aux KEY ?2", -1, &stmt, NULL) != SQLITE_OK) return;
+    lib->bind_text(stmt, 1, files[file], -1, SQLITE_STATIC);
+    lib->bind_blob(stmt, 2, key.bytes, key.len, SQLITE_TRANSIENT);
+  }
   trusted = 1;
   int rc = drain(stmt, NULL);
   trusted = 0;
   if (rc != SQLITE_OK) return;
-  /* Same reasoning as op_key: attaching with a key never retroactively encrypts content the file already had, so
-     a read has to confirm this key actually matches it first. */
-  unsigned long long before_hash = tamper_hash_file(files[file]);
-  int vrc = key_verified(db, "aux");
-  tamper_check_wrong_key(vrc, before_hash, files[file]);
-  if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
-  if (key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
-  char sql[96];
-  snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
-  run_trusted(db, sql, NULL);
+  if (!keyless) {
+    /* Same reasoning as op_key: attaching with a key never retroactively encrypts content the file already had,
+       so a read has to confirm this key actually matches it first. */
+    unsigned long long before_hash = tamper_hash_file(files[file]);
+    int vrc = key_verified(db, "aux");
+    tamper_check_wrong_key(vrc, before_hash, files[file]);
+    if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
+    if (key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
+    char sql[96];
+    snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
+    run_trusted(db, sql, NULL);
+  }
   for (unsigned i = 0; i < settings; i++) {
     const uint8_t *setting = in->data;
     enum setting chosen = apply_setting(db, "aux", in, NULL);
@@ -744,6 +806,7 @@ static void op_attach(struct input *in) {
     if (move_rc == SQLITE_OK) {
       model_check_contains(lib, db, "aux", file, files[file], "sqlcipher_export");
       model_note_damage(file);
+      export_touched[db_file] = export_touched[file] = 1;
     } else {
       model_discard();
     }
@@ -755,6 +818,7 @@ static void op_attach(struct input *in) {
     if (move_rc == SQLITE_OK) {
       model_check_contains(lib, db, "main", db_file, files[db_file], "sqlcipher_export");
       model_note_damage(db_file);
+      export_touched[db_file] = export_touched[file] = 1;
     } else {
       model_discard();
     }
@@ -779,6 +843,13 @@ static void op_backup(struct input *in) {
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
   sqlite3 *dest = open_file(file, 1);
   if (!dest) return;
+  /* Marked export_touched-style exempt from differential_plain's own comparison unconditionally, before any of
+     the rest of this op runs: sqlite3_backup_init's own guard rejects a plaintext source paired with an
+     encrypted destination, which can make the backup attempt itself succeed on a provider with no codec at all
+     (neither connection is ever "encrypted" there, so no such mismatch exists) while failing outright on a
+     codec connection, an asymmetry in whether anything gets copied at all, not just in what replay reconstructs
+     afterward. */
+  export_touched[db_file] = export_touched[file] = 1;
   /* Each backup targeting file is its own, independent keying event, so an earlier one's expectation for it,
      possibly with a completely different key, must not carry over. */
   confidentiality_forget_file(file);
@@ -786,8 +857,9 @@ static void op_backup(struct input *in) {
   recipes[file].passphrase = key.passphrase;
   int rc = apply_key(dest, "main", &key, 0, NULL);
   /* Same reasoning as op_key: key_v2 on dest never retroactively encrypts content dest already had, so a read has
-     to confirm this key actually matches it first. */
-  if (rc == SQLITE_OK) {
+     to confirm this key actually matches it first. A provider with no codec at all has nothing to verify or
+     mark keyed here either, the same as op_key's and op_attach's own keyless paths. */
+  if (lib->key_v2 && rc == SQLITE_OK) {
     unsigned long long before_hash = tamper_hash_file(files[file]);
     int vrc = key_verified(dest, "main");
     tamper_check_wrong_key(vrc, before_hash, files[file]);
@@ -838,6 +910,7 @@ static void op_fault_txn(struct input *in) {
      an attached schema's cipher_page_size differing from main's own; not narrowed further than the general
      condition that made every attempt meaningless anyway. */
   if (!db || !lib->get_autocommit(db)) return;
+  fault_touched[db_file] = 1;
   touched = 1;
   enum fault_kind kind = kinds[u8(in) % (sizeof kinds / sizeof *kinds)];
   unsigned countdown = u8(in);
@@ -968,6 +1041,7 @@ static void op_cache_race(struct input *in) {
     struct key key;
     read_key(in, &key);
     apply_key(db, "main", &key, 1, NULL);
+    for (int i = 0; i < SCRIPT_FILES; i++) export_touched[i] = 1;
     record(db_file, STEP_REKEY, start, in->data);
     if (key.passphrase) recipes[db_file].passphrase = 1;
   } else if (kind == 1) {
@@ -1006,6 +1080,8 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
   budget = SCRIPT_BUDGET;
   memset(recipes, 0, sizeof recipes);
   memset(ever_db_file, 0, sizeof ever_db_file);
+  memset(export_touched, 0, sizeof export_touched);
+  memset(fault_touched, 0, sizeof fault_touched);
   for (int n = 0; n < MAX_OPS && in->size; n++) {
     unsigned opcode = u8(in) & OP_MASK;
     if (opcode >= OP_COUNT) continue; /* Reserved for a future op: no-op. */
@@ -1105,6 +1181,10 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
   confidentiality_check(files, SCRIPT_FILES);
 }
 
+int script_export_touched(int file) { return file >= 0 && file < SCRIPT_FILES && export_touched[file]; }
+
+int script_fault_touched(int file) { return file >= 0 && file < SCRIPT_FILES && fault_touched[file]; }
+
 void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
   use(api);
   budget = DUMP_BUDGET;
@@ -1115,5 +1195,54 @@ void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
     read_all(handle, out);
     tamper_check(lib, handle, file, files[file]);
   } /* L8 */
+  lib->close_v2(handle);
+}
+
+/* Table names, rows and a plain integrity_check only, no dump_code for the open, the key application or the
+   schema-listing query's own result codes, and no cipher_integrity_check: those all differ structurally between
+   a codec connection and one with none at all, even when both read back the exact same logical content, so
+   comparing them is this module's own noise, not script_dump_content's callers' finding to make. Mirrors
+   plaindiff.c's own proven dump() shape for exactly this kind of cipher-vs-plain comparison. */
+static void content_only(sqlite3 *handle, struct dump *out) {
+  char names[MAX_DUMP_TABLES][128];
+  int count = 0;
+  sqlite3_stmt *stmt = NULL;
+  int rc = lib->prepare_v2(handle, "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name", -1, &stmt,
+                           NULL);
+  if (rc == SQLITE_OK) {
+    while ((rc = lib->step(stmt)) == SQLITE_ROW) {
+      dump_row(stmt, out);
+      const unsigned char *name = lib->column_blob(stmt, 0);
+      int len = lib->column_bytes(stmt, 0);
+      if (count < MAX_DUMP_TABLES && name && len < (int)sizeof names[0]) {
+        memcpy(names[count], name, (size_t)len);
+        names[count++][len] = 0;
+      }
+    }
+    lib->finalize(stmt);
+  }
+  for (int i = 0; i < count; i++) {
+    char sql[300] = "SELECT * FROM \"";
+    size_t at = strlen(sql);
+    for (const char *c = names[i]; *c; c++) {
+      if (*c == '"') sql[at++] = '"';
+      sql[at++] = *c;
+    }
+    sql[at++] = '"';
+    sql[at] = 0;
+    run(handle, sql, out);
+  }
+  run_trusted(handle, "PRAGMA integrity_check", out);
+}
+
+/* Like script_dump, but for comparing a codec connection's content against one with no codec at all (plain
+   SQLite): the open and key-reconstruction steps run exactly as script_dump's own do, silently (out is NULL for
+   replay here), only the actual table content and a plain integrity_check ever reach the comparison. */
+void script_dump_content(const struct fuzz_sqlite *api, int file, struct dump *out) {
+  use(api);
+  budget = DUMP_BUDGET;
+  sqlite3 *handle = open_file(file, 0);
+  if (!handle) return;
+  if (!replay(handle, file, NULL)) content_only(handle, out);
   lib->close_v2(handle);
 }

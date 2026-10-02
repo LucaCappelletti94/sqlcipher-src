@@ -77,6 +77,7 @@ targets() {
     target codec "codec$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt"
     target codec "codec${suffix}_system_heap" -DFUZZ_LIBTOMCRYPT="${libtomcrypt}_system_heap"
     target differential "differential$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL="$openssl"
+    target differential_plain "differential_plain$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_PLAIN=fuzz_sqlite_release_plain
     for heap in "" _system_heap; do
         # shellcheck disable=SC2086
         $CXX $CXXFLAGS "$WORK/codec$suffix$heap.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" \
@@ -110,6 +111,9 @@ targets() {
     # shellcheck disable=SC2086
     $CXX $CXXFLAGS "$WORK/differential$suffix.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" "$WORK/${variant}_libtomcrypt.o" \
         "$WORK/${variant}_openssl.o" "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential$suffix"
+    # shellcheck disable=SC2086
+    $CXX $CXXFLAGS "$WORK/differential_plain$suffix.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" \
+        "$WORK/${variant}_libtomcrypt.o" "$WORK/release_plain.o" $LIB_FUZZING_ENGINE -o "$OUT/differential_plain$suffix"
 }
 
 for source in app confidentiality fault known libstate memvfs model pagemut plaindiff random rawfile script tamper uniqueness; do
