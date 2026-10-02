@@ -21,11 +21,16 @@ struct table_hash {
    length-prefixed the same way script.c's own read-back dump already does. schema_rc is the table-listing
    query's own final result code, kept for a trace on a mismatch but never itself compared: a wrong code from an
    allocation or I/O hiccup with the data otherwise consistent is trivial per the plan's own triage bar, so only
-   the tables actually listed and their actual rows are ever what this module compares. */
+   the tables actually listed and their actual rows are ever what this module compares. rows_ok is the same idea
+   one level down: every table's own row-enumeration loop stops the moment step() returns anything but
+   SQLITE_ROW, with no record of whether that was SQLITE_DONE (every row genuinely seen) or a hiccup partway
+   through (SQLITE_NOMEM, SQLITE_IOERR, a busy retry exhausted), so a table truncated by a hiccup hashed the same
+   as a table that way on purpose, the exact gap schema_rc already closes one level up. */
 struct snapshot {
   struct table_hash tables[MAX_TABLES];
   int count;
   int schema_rc;
+  int rows_ok;
 };
 
 /* Whether the table-listing query itself actually finished, rather than breaking off partway through an
@@ -121,6 +126,7 @@ static void take_snapshot(const struct fuzz_sqlite *api, sqlite3 *handle, const 
   }
   out->schema_rc = rc;
   out->count = count;
+  out->rows_ok = 1;
   for (int i = 0; i < count; i++) {
     out->tables[i].name_hash = fnv1a((const unsigned char *)names[i], strlen(names[i]));
     char select[300];
@@ -135,9 +141,10 @@ static void take_snapshot(const struct fuzz_sqlite *api, sqlite3 *handle, const 
     stmt = NULL;
     int row_rc = api->prepare_v2(handle, select, -1, &stmt, NULL);
     if (row_rc == SQLITE_OK) {
-      while (api->step(stmt) == SQLITE_ROW) put_row(api, stmt, &rows);
+      while ((row_rc = api->step(stmt)) == SQLITE_ROW) put_row(api, stmt, &rows);
       api->finalize(stmt);
     }
+    if (row_rc != SQLITE_DONE) out->rows_ok = 0;
     out->tables[i].content_hash = fnv1a(rows.bytes, rows.len);
     free(rows.bytes);
   }
@@ -156,7 +163,7 @@ void model_snapshot(const struct fuzz_sqlite *api, sqlite3 *handle, const char *
     return;
   }
   take_snapshot(api, handle, schema, &scratch);
-  scratch_valid = listing_ok(scratch.schema_rc);
+  scratch_valid = listing_ok(scratch.schema_rc) && scratch.rows_ok;
 }
 
 void model_check(const struct fuzz_sqlite *api, sqlite3 *handle, const char *schema, int file,
@@ -168,7 +175,7 @@ void model_check(const struct fuzz_sqlite *api, sqlite3 *handle, const char *sch
   struct snapshot after;
   take_snapshot(api, handle, schema, &after);
   scratch_valid = 0;
-  if (!listing_ok(after.schema_rc)) return; /* Could not even find out what is there now: not a finding. */
+  if (!listing_ok(after.schema_rc) || !after.rows_ok) return; /* Could not even find out what is there now: not a finding. */
   int same = after.count == scratch.count;
   for (int i = 0; same && i < scratch.count; i++) {
     int j = find_table(&after, scratch.tables[i].name_hash);
@@ -190,7 +197,7 @@ void model_check_contains(const struct fuzz_sqlite *api, sqlite3 *handle, const 
   struct snapshot after;
   take_snapshot(api, handle, schema, &after);
   scratch_valid = 0;
-  if (!listing_ok(after.schema_rc)) return; /* Could not even find out what is there now: not a finding. */
+  if (!listing_ok(after.schema_rc) || !after.rows_ok) return; /* Could not even find out what is there now: not a finding. */
   int same = 1;
   for (int i = 0; same && i < scratch.count; i++) {
     int j = find_table(&after, scratch.tables[i].name_hash);

@@ -132,7 +132,11 @@ static void check_ivs(int file, const char *file_name, int page_size, int reserv
     for (int b = 0; b < unit_len && all_zero; b++) all_zero = bytes[unit_start + b] == 0;
     if (all_zero) continue; /* Never actually written through the codec, not a real draw: ledger L4's exemption. */
     unsigned long long hash = fnv1a(bytes + unit_start, (size_t)unit_len);
-    if (pgno <= st->iv_pages && st->last_iv[pgno - 1] == hash) continue;
+    /* last_iv only tracks this many pages, the same bound tamper.c's own per-page scan uses: a file past it still
+       gets every later page's IV checked against seen_iv below, just not the cheaper "unchanged since last look"
+       skip a page within the tracked range gets, since writing past last_iv's own end would be the out-of-bounds
+       write tamper.c's bound already avoids in its own, separate per-page loop. */
+    if (pgno < MAX_PAGE_CHECK && pgno <= st->iv_pages && st->last_iv[pgno - 1] == hash) continue;
     for (int i = 0; i < st->seen_iv_count; i++) {
       if (st->seen_iv[i] == hash) {
         fprintf(stderr, "oracle=uniqueness file=%s page=%d reason=page IV repeats under the same key within this run\n",
@@ -141,8 +145,10 @@ static void check_ivs(int file, const char *file_name, int page_size, int reserv
       }
     }
     if (st->seen_iv_count < MAX_IV_SEEN) st->seen_iv[st->seen_iv_count++] = hash;
-    if (pgno > st->iv_pages) st->iv_pages = pgno;
-    st->last_iv[pgno - 1] = hash;
+    if (pgno < MAX_PAGE_CHECK) {
+      if (pgno > st->iv_pages) st->iv_pages = pgno;
+      st->last_iv[pgno - 1] = hash;
+    }
   }
 }
 
