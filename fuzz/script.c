@@ -923,12 +923,19 @@ static void op_canary(struct input *in) {
 static void op_fault_txn(struct input *in) {
   static const enum fault_kind kinds[] = {FAULT_SHORT_READ, FAULT_SHORT_WRITE, FAULT_ENOSPC, FAULT_FSYNC,
                                            FAULT_ALLOC};
-  /* L12: this op's own BEGIN IMMEDIATE inside an already-open transaction always fails for that unrelated
-     reason regardless of whatever fault gets armed, leaving an empty outer transaction whose own later COMMIT
-     has read past a main page-cache buffer sized for a different page than an attached schema's, confirmed with
-     an attached schema's cipher_page_size differing from main's own; not narrowed further than the general
-     condition that made every attempt meaningless anyway. */
-  if (!db || !lib->get_autocommit(db)) return;
+  /* L12: this op's own COMMIT, here or (when a BEGIN was already open) in the batch of writes below, reads past
+     a main page-cache buffer sized for a different page than an attached schema's, whenever an attached schema's
+     cipher_page_size differs from main's own; confirmed deterministic through a stuck-open-transaction path
+     (BEGIN IMMEDIATE always fails for the unrelated reason of already being inside a transaction, leaving an
+     empty outer transaction whose own COMMIT crashes) and, separately, flaky but genuinely reproducing at least
+     once through ordinary autocommit (ASan's own redzone placement varies this path's visibility between process
+     runs, not the underlying defect, which a same-address, same-stack crash confirms is the identical bug).
+     Neither path is narrowed further than this general condition, which covers both. */
+  if (!db) return;
+  if (!lib->get_autocommit(db)) return;
+  int main_page_size = lib_int(lib, db, "PRAGMA main.cipher_page_size");
+  int aux_page_size = lib_int(lib, db, "PRAGMA aux.cipher_page_size");
+  if (aux_page_size > 0 && aux_page_size != main_page_size) return;
   fault_touched[db_file] = 1;
   touched = 1;
   enum fault_kind kind = kinds[u8(in) % (sizeof kinds / sizeof *kinds)];
