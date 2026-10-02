@@ -647,6 +647,22 @@ static void op_pragma(struct input *in) {
   if (header_mismatch(db, db_file)) close_db(); /* L8 */
 }
 
+/* Whether file has a hot journal or WAL memvfs sibling with bytes in it: SQLite's own lazy recovery rolls either
+   back into the main file on the very next real page access, rewriting it to the pre-crash state the journal or
+   WAL already holds, independent of whatever key that access happens to be trying. A key-verification read is
+   exactly such an access, so the wrong-key oracle has to skip a file recovery could legitimately touch, or every
+   hot journal or WAL an earlier, unrelated op left behind reads as this key having corrupted the file. */
+static int has_pending_recovery(int file) {
+  char name[64];
+  size_t len = 0;
+  snprintf(name, sizeof name, "%s-journal", files[file]);
+  memvfs_peek(name, &len);
+  if (len) return 1;
+  snprintf(name, sizeof name, "%s-wal", files[file]);
+  memvfs_peek(name, &len);
+  return len != 0;
+}
+
 static void op_key(struct input *in, int rekey) {
   const uint8_t *start = in->data;
   struct key key;
@@ -696,9 +712,10 @@ static void op_key(struct input *in, int rekey) {
      from the salt check the same way. */
   if (!rekey && rc == SQLITE_OK) {
     unsigned long long before_hash = tamper_hash_file(files[db_file]);
+    int recovery_pending = has_pending_recovery(db_file);
     int vrc = key_verified(db, "main");
     touched = 1; /* key_verified's own read, success or failure, already derived the key against a real page. */
-    tamper_check_wrong_key(vrc, before_hash, files[db_file]);
+    if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[db_file]);
     if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(db_file);
   } else if (rc == SQLITE_OK && key.len > 0) {
     confidentiality_mark_keyed(db_file);
@@ -782,8 +799,9 @@ static void op_attach(struct input *in) {
     /* Same reasoning as op_key: attaching with a key never retroactively encrypts content the file already had,
        so a read has to confirm this key actually matches it first. */
     unsigned long long before_hash = tamper_hash_file(files[file]);
+    int recovery_pending = has_pending_recovery(file);
     int vrc = key_verified(db, "aux");
-    tamper_check_wrong_key(vrc, before_hash, files[file]);
+    if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[file]);
     if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
     if (key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
     char sql[96];
@@ -861,8 +879,9 @@ static void op_backup(struct input *in) {
      mark keyed here either, the same as op_key's and op_attach's own keyless paths. */
   if (lib->key_v2 && rc == SQLITE_OK) {
     unsigned long long before_hash = tamper_hash_file(files[file]);
+    int recovery_pending = has_pending_recovery(file);
     int vrc = key_verified(dest, "main");
-    tamper_check_wrong_key(vrc, before_hash, files[file]);
+    if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[file]);
     if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
   }
   if (rc == SQLITE_OK && key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
@@ -1040,7 +1059,11 @@ static void op_cache_race(struct input *in) {
     const uint8_t *start = in->data;
     struct key key;
     read_key(in, &key);
-    apply_key(db, "main", &key, 1, NULL);
+    int rekey_rc = apply_key(db, "main", &key, 1, NULL);
+    /* Same reasoning as op_key's own rekey path: a successful rekey to an empty key removes the codec and
+       writes the file back out in plaintext just as definitively as a non-empty key encrypts it, so this
+       duplicate of op_key's own rekey call needs the same confidentiality_forget_file, not just op_key's. */
+    if (rekey_rc == SQLITE_OK && key.len == 0) confidentiality_forget_file(db_file);
     for (int i = 0; i < SCRIPT_FILES; i++) export_touched[i] = 1;
     record(db_file, STEP_REKEY, start, in->data);
     if (key.passphrase) recipes[db_file].passphrase = 1;

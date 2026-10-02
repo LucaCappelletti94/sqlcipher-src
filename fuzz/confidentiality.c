@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "confidentiality.h"
 #include "memvfs.h"
@@ -21,12 +23,28 @@ struct marker {
 
 static struct marker markers[MAX_MARKERS];
 static int marker_count;
+/* Process-wide and never reset: seq starting at a fixed 0 every input would make the very first canary of every
+   single run the same 16 bytes (the magic plus an all-zero counter suffix), a value trivial for a mutator to
+   reproduce by accident (an all-zero suffix is an ordinary degenerate pattern, not a 2^-64 coincidence) and then
+   carry forward through the corpus into runs that never planted that canary at all. Seeded once, lazily, from
+   real time rather than from anything the fuzzer input or the deterministic per-input streams influence, so no
+   execution's first marker is ever predictable or reproducible by choice of input. */
 static unsigned long long seq;
+static int seq_seeded;
 static int expect_encrypted[SCRIPT_FILES];
+
+static unsigned long long next_seq(void) {
+  if (!seq_seeded) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    seq = ((unsigned long long)ts.tv_nsec << 32) ^ (unsigned long long)ts.tv_sec ^ (unsigned long long)getpid();
+    seq_seeded = 1;
+  }
+  return seq++;
+}
 
 void confidentiality_reset(void) {
   marker_count = 0;
-  seq = 0;
   memset(expect_encrypted, 0, sizeof expect_encrypted);
 }
 
@@ -53,8 +71,8 @@ void confidentiality_plant(const struct fuzz_sqlite *api, sqlite3 *db) {
   if (!db || marker_count >= MAX_MARKERS) return;
   unsigned char marker[MARKER_LEN];
   memcpy(marker, MAGIC, sizeof MAGIC);
-  for (int i = 0; i < 8; i++) marker[8 + i] = (unsigned char)(seq >> (8 * i));
-  seq++;
+  unsigned long long value = next_seq();
+  for (int i = 0; i < 8; i++) marker[8 + i] = (unsigned char)(value >> (8 * i));
   char hex[2 * MARKER_LEN + 1];
   hexenc(hex, marker, MARKER_LEN);
   char sql[256];

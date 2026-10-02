@@ -8,15 +8,19 @@
    file for it at the end of a run, skipping a file no non-empty key was ever applied to, since a deliberate
    unencrypted export (VACUUM INTO, a backup or an export target given no key) legitimately carries the same
    bytes on purpose. Every marker is a fixed prefix nothing else the harness writes ever produces, followed by a
-   counter, so two markers never collide and a marker never matches content another op happened to write by
-   coincidence.
+   counter that is process-wide and never reset, seeded once from real time rather than from input or from any
+   deterministic per-input stream: resetting it to 0 at the start of every input made the very first canary of
+   every single run the same fixed 16 bytes (the prefix plus an all-zero counter suffix), a value a mutator can
+   reproduce by accident, since an all-zero suffix is an ordinary degenerate byte pattern rather than a genuine
+   2^-64 coincidence, and then carry forward through the corpus into runs that never planted that canary at all.
 
    The key itself is deliberately not scanned for: unlike a marker, it is read straight off the fuzzer input, the
    same input op_statement's bound text and blobs read from, so a mutator that duplicates a chunk of the input
    (InsertRepeatedBytes, CopyPart) routinely makes a key's bytes recur elsewhere in the very same run as ordinary,
    unrelated row content, a coincidence a real application's independently-chosen key could not produce. */
 
-/* Clears every planted marker and every per-file expecting-encryption flag, before each input. */
+/* Clears every planted marker and every per-file expecting-encryption flag, before each input. Leaves the
+   process-wide counter untouched, so no two inputs across a whole fuzzing session ever plant the same marker. */
 void confidentiality_reset(void);
 
 /* Clears file's expecting-encryption flag, when a fresh connection opens it with no key inherited from whatever
