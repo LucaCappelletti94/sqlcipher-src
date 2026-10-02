@@ -41,6 +41,17 @@ LIBCRYPTO=$(pkg-config --variable=libdir libcrypto)/libcrypto.a
 SOURCES=${FUZZ_SQLCIPHER_SOURCES:?set FUZZ_SQLCIPHER_SOURCES to the directory fuzz/sources.sh wrote}
 echo "prerelease at $(cat "$SOURCES/prerelease/COMMIT")"
 
+# MSan requires every linked object instrumented, and the static libcrypto the Dockerfile builds carries none, so an
+# MSan build skips the OpenSSL provider, the differential target that links it, and the private heap (MSan's own
+# shadow tracking needs every byte to pass through an instrumented allocator, which the private heap's own
+# sub-allocation never does), keeping only the shipped release the same way FUZZ_RELEASE_ONLY does for PR fuzzing: a
+# beta/prerelease-only crash needs the same upstream fix regardless of which job finds it, and batch and continuous
+# fuzzing already cover both under ASan and UBSan.
+msan=0
+if [ "${SANITIZER:-}" = memory ]; then
+    msan=1
+fi
+
 # Compiles translation unit $3 as provider $2 of variant $1, with any further arguments as compiler flags. Every global
 # except the API table gets a per-build prefix, so two SQLCipher copies link into one binary. Localizing instead fails,
 # since the sanitizers' per-global COMDAT groups keep the shared names. The steps are chained because spawn runs this
@@ -74,17 +85,23 @@ target() {
 targets() {
     local variant=$1 suffix=$2
     local libtomcrypt="fuzz_sqlite_${variant}_libtomcrypt" openssl="fuzz_sqlite_${variant}_openssl"
+    local heaps=("" _system_heap)
+    local plain_heap=""
+    if [ "$msan" = 1 ]; then
+        heaps=(_system_heap)
+        plain_heap=_system_heap
+    fi
     target codec "codec$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt"
     target codec "codec${suffix}_system_heap" -DFUZZ_LIBTOMCRYPT="${libtomcrypt}_system_heap"
     target differential "differential$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL="$openssl"
-    target differential_plain "differential_plain$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_PLAIN=fuzz_sqlite_release_plain
-    for heap in "" _system_heap; do
+    target differential_plain "differential_plain$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt$plain_heap" -DFUZZ_PLAIN=fuzz_sqlite_release_plain
+    for heap in "${heaps[@]}"; do
         # shellcheck disable=SC2086
         $CXX $CXXFLAGS "$WORK/codec$suffix$heap.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" \
             "$WORK/${variant}_libtomcrypt$heap.o" $LIB_FUZZING_ENGINE -o "$OUT/codec$suffix$heap"
         cp codec.dict "$OUT/codec$suffix$heap.dict"
     done
-    for heap in "" _system_heap; do
+    for heap in "${heaps[@]}"; do
         local table="${libtomcrypt}$heap" binary="hostile_file$suffix$heap"
         target hostile_file "$binary" -DFUZZ_LIBRARY_TABLE="$table"
         target seedgen "seedgen$suffix$heap" -DFUZZ_LIBRARY_TABLE="$table"
@@ -107,13 +124,16 @@ targets() {
         cp "$OUT/${binary}_seed_corpus.zip" "$OUT/${keyed}_seed_corpus.zip"
         printf '[libfuzzer]\nmax_len = 200000\n' | tee "$OUT/$binary.options" > "$OUT/$keyed.options"
     done
-    # OpenSSL links statically, since the runner image that executes the targets has no libcrypto.
-    # shellcheck disable=SC2086
-    $CXX $CXXFLAGS "$WORK/differential$suffix.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" "$WORK/${variant}_libtomcrypt.o" \
-        "$WORK/${variant}_openssl.o" "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential$suffix"
+    # OpenSSL links statically, since the runner image that executes the targets has no libcrypto; an MSan build
+    # skips it, since that static library carries no MSan instrumentation.
+    if [ "$msan" = 0 ]; then
+        # shellcheck disable=SC2086
+        $CXX $CXXFLAGS "$WORK/differential$suffix.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" "$WORK/${variant}_libtomcrypt.o" \
+            "$WORK/${variant}_openssl.o" "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential$suffix"
+    fi
     # shellcheck disable=SC2086
     $CXX $CXXFLAGS "$WORK/differential_plain$suffix.o" "$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o" "$WORK/uniqueness.o" "$WORK/model.o" \
-        "$WORK/${variant}_libtomcrypt.o" "$WORK/release_plain.o" $LIB_FUZZING_ENGINE -o "$OUT/differential_plain$suffix"
+        "$WORK/${variant}_libtomcrypt$plain_heap.o" "$WORK/release_plain.o" $LIB_FUZZING_ENGINE -o "$OUT/differential_plain$suffix"
 }
 
 for source in app confidentiality fault known libstate memvfs model pagemut plaindiff random rawfile script tamper uniqueness; do
@@ -125,17 +145,22 @@ done
 # corrupts a block header. Each variant also builds on the system heap, which reports the faulting access itself.
 system_heap=(-DSQLCIPHER_OMIT_MALLOC)
 
-# The shipped release, whose libtomcrypt build is sqlcipher/sqlite3.c itself.
-spawn release libtomcrypt libtomcrypt.c
+# The shipped release, whose libtomcrypt build is sqlcipher/sqlite3.c itself. An MSan build skips the private heap
+# and the OpenSSL provider; see the comment by msan's own assignment near the top.
+if [ "$msan" = 0 ]; then
+    spawn release libtomcrypt libtomcrypt.c
+fi
 spawn release libtomcrypt_system_heap libtomcrypt.c "${system_heap[@]}"
-spawn release openssl openssl.c -iquote ../sqlcipher
+if [ "$msan" = 0 ]; then
+    spawn release openssl openssl.c -iquote ../sqlcipher
+fi
 # Plain SQLite from the same amalgamation, the reference keyed_file compares every line against.
 spawn release plain plain.c -iquote ../sqlcipher
 
 # The fetched lines, which 5.x only builds with SQLITE_DIRECT_OVERFLOW_READ off. Skipped when FUZZ_RELEASE_ONLY is
 # set, for PR fuzzing's short budget: a beta or prerelease crash still needs an upstream fix regardless of how
 # quickly a PR run finds it, so the fast path only needs the shipped release.
-if [ -z "${FUZZ_RELEASE_ONLY:-}" ]; then
+if [ -z "${FUZZ_RELEASE_ONLY:-}" ] && [ "$msan" = 0 ]; then
     for variant in beta prerelease; do
         fetched=(-iquote "$SOURCES/$variant" -I ../sqlcipher -DSQLITE_DIRECT_OVERFLOW_READ=0)
         spawn "$variant" libtomcrypt fetched_libtomcrypt.c "${fetched[@]}"
@@ -150,7 +175,7 @@ wait
 file_units=("$WORK/app.o" "$WORK/rawfile.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/fault.o" "$WORK/known.o" "$WORK/random.o")
 
 targets release ""
-if [ -z "${FUZZ_RELEASE_ONLY:-}" ]; then
+if [ -z "${FUZZ_RELEASE_ONLY:-}" ] && [ "$msan" = 0 ]; then
     targets beta _beta
     targets prerelease _prerelease
 fi
