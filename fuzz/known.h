@@ -27,9 +27,11 @@ int known_header_page_mismatch(int major, int header_page, int codec_page);
 /* L6: a codec setting applied after the connection touched its file. */
 int known_late_setting(const char *name);
 
-/* L11: PRAGMA cipher_migrate poisons the connection (SQLITE_NOTADB on every later read) when it fails before
-   touching anything, which it always does on a connection keyed without a passphrase, since there is then no
-   underived key material for it to retry legacy KDF schemes with. */
-int known_migrate_poisons(int passphrase);
+/* L11: PRAGMA cipher_migrate poisons the connection (SQLITE_MISUSE on the call itself, then SQLITE_NOTADB on every
+   later read) whenever it runs after the connection was otherwise already touched, which has already derived the
+   key and discarded the underived material cipher_migrate needs to retry legacy KDF schemes with. This holds for
+   every key form, raw or passphrase alike; migrate run as the connection's first operation, before anything else
+   touches it, succeeds instead. */
+int known_migrate_poisons(int already_touched);
 
 #endif

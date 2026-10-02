@@ -599,6 +599,7 @@ static void op_statement(struct input *in) {
   unsigned small = u8(in);
   struct input text = take(in, 256);
   if (!db) return;
+  int already_touched = touched;
   touched = 1;
   int is_migrate = strcmp(statements[index], "PRAGMA cipher_migrate") == 0;
   /* Migration retries the passphrase at the legacy kdf_iter counts, far beyond a fuzz iteration's time. */
@@ -610,7 +611,7 @@ static void op_statement(struct input *in) {
   lib->bind_int64(stmt, 2, small);
   lib->bind_text(stmt, 3, (const char *)text.data, (int)text.size, SQLITE_TRANSIENT);
   trusted = 1;
-  int migrate_check = is_migrate && !known_migrate_poisons(recipes[db_file].passphrase);
+  int migrate_check = is_migrate && !known_migrate_poisons(already_touched);
   if (migrate_check) model_snapshot(lib, db, "main", db_file);
   int rc = drain(stmt, NULL);
   trusted = 0;
@@ -684,13 +685,14 @@ static void op_key(struct input *in, int rekey) {
      this run's own. Marked regardless of this rekey's own outcome, since the recorded step gets replayed either
      way. */
   if (rekey) model_note_damage(db_file);
-  /* cipher_migrate needs the connection's underived passphrase, which SQLCipher discards after the first real
-     page access derives the actual key, so it only ever has a chance right here, before anything else, the
-     key_verified read below included, touches the connection: op_statement's own "PRAGMA cipher_migrate" entry
-     can only ever hit the immediate SQLITE_MISUSE bailout once picked among ~23 other choices with no ordering
-     guarantee relative to the key. */
+  /* cipher_migrate needs the connection's underived key material, which SQLCipher discards after the first real
+     page access derives the actual key, so it only ever succeeds right here, before anything else, the
+     key_verified read below included, touches the connection; touched is guaranteed false at this point, the
+     non-rekey early return above already skips this whole function otherwise. Whether op_statement's own
+     "PRAGMA cipher_migrate" entry, picked among ~23 other choices with no ordering guarantee relative to the key,
+     poisons the connection depends on that same timing, not on whether this key is raw or a passphrase. */
   if (!rekey && rc == SQLITE_OK && !key.passphrase && key.migrate) {
-    int migrate_check = !known_migrate_poisons(key.passphrase);
+    int migrate_check = !known_migrate_poisons(touched);
     if (migrate_check) model_snapshot(lib, db, "main", db_file);
     int migrate_rc = run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
     if (migrate_check) {
