@@ -76,7 +76,6 @@
 "WAL"
 "locking_mode"
 "EXCLUSIVE"
-"page_size"
 "auto_vacuum"
 "INCREMENTAL"
 "incremental_vacuum"

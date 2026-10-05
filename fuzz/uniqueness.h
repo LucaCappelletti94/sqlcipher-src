@@ -5,8 +5,7 @@
 
 /* Checks that a keyed database never draws the same per-page IV twice and that no two databases this run ever
    draw the same salt: both come straight off the deterministic RNG (fuzz/random.c), so a page IV or a salt
-   repeating is exactly what a frozen or truncated stream looks like from the outside, the same class of bug L10
-   and P2 already found and fixed once each in the differential and confidentiality oracles. The salt, and every
+   repeating is exactly what a frozen or truncated stream looks like from the outside. The salt, and every
    page's IV, sit unencrypted in the file (the codec authenticates and encrypts everything around them, never
    them), so both are readable straight out of memvfs bytes once the file's page size and reserve layout are
    known. That layout, together with a per-page fingerprint of the current IV and a whole-file fingerprint of the
@@ -23,8 +22,7 @@
    op_attach and op_backup already use before confidentiality_mark_keyed. op_damage writes bytes taken straight
    off the fuzzer input, the same input a mutator routinely duplicates a chunk of (InsertRepeatedBytes, CopyPart,
    CrossOver), so a flip or an overwrite landing on a reserve or a salt can make two files agree on bytes neither
-   the RNG nor the codec ever put there, exactly the false positive the confidentiality oracle already retracted
-   once for key material read the same way. A file op_damage ever touches is marked and skipped entirely from
+   the RNG nor the codec ever put there. A file op_damage ever touches is marked and skipped entirely from
    here on, the same call sites and file index tamper_flip and tamper_note already use. PRAGMA cipher_salt lets
    a script set an arbitrary, fuzzer-chosen salt explicitly (SET_SALT in script.c's own setting list), a real,
    documented feature applications use precisely to make two databases share one salt on purpose, so a file

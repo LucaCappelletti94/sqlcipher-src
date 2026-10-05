@@ -925,14 +925,8 @@ static void op_canary(struct input *in) {
 static void op_fault_txn(struct input *in) {
   static const enum fault_kind kinds[] = {FAULT_SHORT_READ, FAULT_SHORT_WRITE, FAULT_ENOSPC, FAULT_FSYNC,
                                            FAULT_ALLOC};
-  /* L12: this op's own COMMIT, here or (when a BEGIN was already open) in the batch of writes below, reads past
-     a main page-cache buffer sized for a different page than an attached schema's, whenever an attached schema's
-     cipher_page_size differs from main's own; confirmed deterministic through a stuck-open-transaction path
-     (BEGIN IMMEDIATE always fails for the unrelated reason of already being inside a transaction, leaving an
-     empty outer transaction whose own COMMIT crashes) and, separately, flaky but genuinely reproducing at least
-     once through ordinary autocommit (ASan's own redzone placement varies this path's visibility between process
-     runs, not the underlying defect, which a same-address, same-stack crash confirms is the identical bug).
-     Neither path is narrowed further than this general condition, which covers both. */
+  /* L12: skip when an attached schema's cipher_page_size differs from main's, since this op's own COMMIT
+     then reads past a main page-cache buffer sized for the wrong page. */
   if (!db) return;
   if (!lib->get_autocommit(db)) return;
   int main_page_size = lib_int(lib, db, "PRAGMA main.cipher_page_size");

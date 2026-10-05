@@ -23,12 +23,9 @@ struct marker {
 
 static struct marker markers[MAX_MARKERS];
 static int marker_count;
-/* Process-wide and never reset: seq starting at a fixed 0 every input would make the very first canary of every
-   single run the same 16 bytes (the magic plus an all-zero counter suffix), a value trivial for a mutator to
-   reproduce by accident (an all-zero suffix is an ordinary degenerate pattern, not a 2^-64 coincidence) and then
-   carry forward through the corpus into runs that never planted that canary at all. Seeded once, lazily, from
-   real time rather than from anything the fuzzer input or the deterministic per-input streams influence, so no
-   execution's first marker is ever predictable or reproducible by choice of input. */
+/* Process-wide and never reset, seeded once, lazily, from real time rather than from anything the fuzzer input
+   or the deterministic per-input streams influence, so no execution's first marker is ever predictable or
+   reproducible by choice of input. */
 static unsigned long long seq;
 static int seq_seeded;
 static int expect_encrypted[SCRIPT_FILES];
