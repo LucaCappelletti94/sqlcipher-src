@@ -135,27 +135,9 @@ static struct input take(struct input *in, size_t max) {
   return out;
 }
 
-static void hex(char *out, const unsigned char *bytes, int len) {
-  static const char digits[] = "0123456789abcdef";
-  for (int i = 0; i < len; i++) {
-    out[2 * i] = digits[bytes[i] >> 4];
-    out[2 * i + 1] = digits[bytes[i] & 15];
-  }
-  out[2 * len] = 0;
-}
-
 static void dump_put(struct dump *out, const void *bytes, size_t len) {
-  if (!out || out->len + len > MAX_DUMP) return;
-  if (out->len + len > out->cap) {
-    size_t cap = out->cap ? out->cap : 4096;
-    while (cap < out->len + len) cap *= 2;
-    unsigned char *grown = realloc(out->bytes, cap);
-    if (!grown) abort();
-    out->bytes = grown;
-    out->cap = cap;
-  }
-  memcpy(out->bytes + out->len, bytes, len);
-  out->len += len;
+  if (!out) return;
+  fuzz_grow_append(&out->bytes, &out->len, &out->cap, MAX_DUMP, bytes, len);
 }
 
 static void dump_code(struct dump *out, int rc) {
@@ -251,11 +233,6 @@ static int drain(sqlite3_stmt *stmt, struct dump *out) {
   return rc == SQLITE_DONE ? SQLITE_OK : rc;
 }
 
-/* The main database's codec page size, or 0 when it has no codec. */
-static int codec_page_size(sqlite3 *handle) {
-  return lib_int(lib, handle, "PRAGMA main.cipher_page_size");
-}
-
 /* Whether a trivial read through handle's schema actually decodes: forces a page 1 read, which returns something
    other than SQLITE_ROW or SQLITE_DONE when the key just applied to this connection does not match content the
    file already had, whether that content is plaintext or encrypted under a different key. A fresh, empty file
@@ -277,13 +254,13 @@ static int verified(int rc) { return rc == SQLITE_ROW || rc == SQLITE_DONE; }
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
 static int vacuum_blocked(sqlite3 *handle, int vacuum) {
   if (!vacuum || (vacuum == 1 && lib_int(lib, handle, "PRAGMA temp_store") != 1)) return 0;
-  return known_backup_blocked(major, codec_page_size(handle), lib_int(lib, handle, "PRAGMA cipher_default_page_size"));
+  return known_backup_blocked(major, fuzz_codec_page_size(lib, handle), lib_int(lib, handle, "PRAGMA cipher_default_page_size"));
 }
 
 /* L8: the handle would read file's plaintext-header database with a different page size than the header states. */
 static int header_mismatch(sqlite3 *handle, int file) {
   int header_page = file < 0 ? 0 : memvfs_header_page_size(files[file]);
-  return header_page && known_header_page_mismatch(major, header_page, codec_page_size(handle));
+  return header_page && known_header_page_mismatch(major, header_page, fuzz_codec_page_size(lib, handle));
 }
 
 /* Runs every statement in sql and returns the first failure. */
@@ -332,7 +309,7 @@ static void read_key(struct input *in, struct key *key) {
     for (int i = 0; i < len; i++) raw[i] = (unsigned char)u8(in);
     key->bytes[0] = 'x';
     key->bytes[1] = '\'';
-    hex((char *)key->bytes + 2, raw, len);
+    fuzz_hex((char *)key->bytes + 2, raw, len);
     key->bytes[2 + 2 * len] = '\'';
     key->len = 3 + 2 * len;
     key->migrate = (form & 4) != 0;
@@ -441,7 +418,7 @@ static enum setting format_setting(struct input *in, const char *schema, char *s
   }
   case SET_SALT:
     for (int i = 0; i < 16; i++) salt[i] = (unsigned char)u8(in);
-    hex(salt_hex, salt, 16);
+    fuzz_hex(salt_hex, salt, 16);
     snprintf(sql, cap, "PRAGMA \"%s\".cipher_salt = \"x'%s'\"", schema, salt_hex);
     break;
   case SET_COMPATIBILITY:
@@ -477,7 +454,7 @@ static enum setting format_setting(struct input *in, const char *schema, char *s
        setting above, whose SQL keeps working regardless of the specific number or string it mutates in. */
     unsigned len = u8(in) % (sizeof random_data + 1);
     for (unsigned i = 0; i < len; i++) random_data[i] = (unsigned char)u8(in);
-    hex(random_hex, random_data, len);
+    fuzz_hex(random_hex, random_data, len);
     snprintf(sql, cap, "PRAGMA \"%s\".cipher_add_random = \"x'%s'\"", schema, random_hex);
     break;
   }
@@ -535,25 +512,31 @@ static int replay(sqlite3 *handle, int file, struct dump *out) {
   return failed || header_mismatch(handle, file);
 }
 
-static void read_all(sqlite3 *handle, struct dump *out) {
-  char names[MAX_DUMP_TABLES][128];
+/* Table names in handle's schema, dumping each schema row into out as it scans, collected up to max into names.
+   *rc is the schema-listing query's own final result code. */
+static int list_tables(sqlite3 *handle, struct dump *out, char names[][128], int max, int *rc) {
   int count = 0;
   sqlite3_stmt *stmt = NULL;
-  int rc = lib->prepare_v2(handle, "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name", -1, &stmt,
-                           NULL);
-  if (rc == SQLITE_OK) {
-    while ((rc = lib->step(stmt)) == SQLITE_ROW) {
+  *rc = lib->prepare_v2(handle, "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name", -1, &stmt,
+                        NULL);
+  if (*rc == SQLITE_OK) {
+    while ((*rc = lib->step(stmt)) == SQLITE_ROW) {
       dump_row(stmt, out);
       const unsigned char *name = lib->column_blob(stmt, 0);
       int len = lib->column_bytes(stmt, 0);
-      if (count < MAX_DUMP_TABLES && name && len < (int)sizeof names[0]) {
+      if (count < max && name && len < 128) {
         memcpy(names[count], name, (size_t)len);
         names[count++][len] = 0;
       }
     }
     lib->finalize(stmt);
   }
-  dump_code(out, rc);
+  return count;
+}
+
+/* Reads every row of each named table, escaping an embedded quote so a crafted table name can never break out of
+   the SELECT. */
+static void read_tables(sqlite3 *handle, struct dump *out, char names[][128], int count) {
   for (int i = 0; i < count; i++) {
     char sql[300] = "SELECT * FROM \"";
     size_t at = strlen(sql);
@@ -565,6 +548,14 @@ static void read_all(sqlite3 *handle, struct dump *out) {
     sql[at] = 0;
     run(handle, sql, out);
   }
+}
+
+static void read_all(sqlite3 *handle, struct dump *out) {
+  char names[MAX_DUMP_TABLES][128];
+  int rc;
+  int count = list_tables(handle, out, names, MAX_DUMP_TABLES, &rc);
+  dump_code(out, rc);
+  read_tables(handle, out, names, count);
   run_trusted(handle, "PRAGMA cipher_integrity_check; PRAGMA integrity_check", out);
 }
 
@@ -664,6 +655,18 @@ static int has_pending_recovery(int file) {
   return len != 0;
 }
 
+/* Checks handle's just-applied key on schema: before the read, so tamper_check_wrong_key can tell a wrong key
+   from a since-healed region by comparing against file's bytes beforehand, and skips that check when file has a
+   pending journal/WAL recovery the read could trip over instead of the key itself. Marks file confidentiality-
+   keyed when the key actually applied and verified, the same rule at every call site. */
+static void verify_key(sqlite3 *handle, const char *schema, int file, int key_len) {
+  unsigned long long before_hash = tamper_hash_file(files[file]);
+  int recovery_pending = has_pending_recovery(file);
+  int vrc = key_verified(handle, schema);
+  if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[file]);
+  if (key_len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
+}
+
 static void op_key(struct input *in, int rekey) {
   const uint8_t *start = in->data;
   struct key key;
@@ -713,12 +716,8 @@ static void op_key(struct input *in, int rekey) {
      explicit salt in its own trailing hex digits, the documented alternative to PRAGMA cipher_salt: it is exempt
      from the salt check the same way. */
   if (!rekey && rc == SQLITE_OK) {
-    unsigned long long before_hash = tamper_hash_file(files[db_file]);
-    int recovery_pending = has_pending_recovery(db_file);
-    int vrc = key_verified(db, "main");
+    verify_key(db, "main", db_file, key.len);
     touched = 1; /* key_verified's own read, success or failure, already derived the key against a real page. */
-    if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[db_file]);
-    if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(db_file);
   } else if (rc == SQLITE_OK && key.len > 0) {
     confidentiality_mark_keyed(db_file);
   } else if (rekey && rc == SQLITE_OK && key.len == 0) {
@@ -800,11 +799,7 @@ static void op_attach(struct input *in) {
   if (!keyless) {
     /* Same reasoning as op_key: attaching with a key never retroactively encrypts content the file already had,
        so a read has to confirm this key actually matches it first. */
-    unsigned long long before_hash = tamper_hash_file(files[file]);
-    int recovery_pending = has_pending_recovery(file);
-    int vrc = key_verified(db, "aux");
-    if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[file]);
-    if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
+    verify_key(db, "aux", file, key.len);
     if (key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
     char sql[96];
     snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
@@ -880,15 +875,11 @@ static void op_backup(struct input *in) {
      to confirm this key actually matches it first. A provider with no codec at all has nothing to verify or
      mark keyed here either, the same as op_key's and op_attach's own keyless paths. */
   if (lib->key_v2 && rc == SQLITE_OK) {
-    unsigned long long before_hash = tamper_hash_file(files[file]);
-    int recovery_pending = has_pending_recovery(file);
-    int vrc = key_verified(dest, "main");
-    if (!recovery_pending) tamper_check_wrong_key(vrc, before_hash, files[file]);
-    if (key.len > 0 && verified(vrc)) confidentiality_mark_keyed(file);
+    verify_key(dest, "main", file, key.len);
   }
   if (rc == SQLITE_OK && key.len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
   record(file, STEP_KEY, start, in->data);
-  if (known_backup_blocked(major, codec_page_size(db), codec_page_size(dest))) {
+  if (known_backup_blocked(major, fuzz_codec_page_size(lib, db), fuzz_codec_page_size(lib, dest))) {
     uniqueness_check(lib, dest, "main", file, files[file]);
     lib->close_v2(dest);
     return;
@@ -1040,7 +1031,7 @@ static void op_cache_race(struct input *in) {
   int index = (int)(target % (unsigned)count);
   if (file_of_memvfs(index) != db_file) return; /* keep the race on the file this connection has open */
   long long size = memvfs_size(index);
-  int page_size = codec_page_size(db);
+  int page_size = fuzz_codec_page_size(lib, db);
   if (!size || page_size <= 0) return;
   long long pgno = size / page_size ? (long long)(u32(in) % (unsigned long long)(size / page_size)) + 1 : 1;
   long long at = (pgno - 1) * page_size + (long long)(page_offset % (unsigned)page_size);
@@ -1231,33 +1222,9 @@ void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
    plaindiff.c's own proven dump() shape for exactly this kind of cipher-vs-plain comparison. */
 static void content_only(sqlite3 *handle, struct dump *out) {
   char names[MAX_DUMP_TABLES][128];
-  int count = 0;
-  sqlite3_stmt *stmt = NULL;
-  int rc = lib->prepare_v2(handle, "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name", -1, &stmt,
-                           NULL);
-  if (rc == SQLITE_OK) {
-    while ((rc = lib->step(stmt)) == SQLITE_ROW) {
-      dump_row(stmt, out);
-      const unsigned char *name = lib->column_blob(stmt, 0);
-      int len = lib->column_bytes(stmt, 0);
-      if (count < MAX_DUMP_TABLES && name && len < (int)sizeof names[0]) {
-        memcpy(names[count], name, (size_t)len);
-        names[count++][len] = 0;
-      }
-    }
-    lib->finalize(stmt);
-  }
-  for (int i = 0; i < count; i++) {
-    char sql[300] = "SELECT * FROM \"";
-    size_t at = strlen(sql);
-    for (const char *c = names[i]; *c; c++) {
-      if (*c == '"') sql[at++] = '"';
-      sql[at++] = *c;
-    }
-    sql[at++] = '"';
-    sql[at] = 0;
-    run(handle, sql, out);
-  }
+  int rc;
+  int count = list_tables(handle, out, names, MAX_DUMP_TABLES, &rc);
+  read_tables(handle, out, names, count);
   run_trusted(handle, "PRAGMA integrity_check", out);
 }
 
