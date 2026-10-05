@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "libstate.h"
 #include "memvfs.h"
 #include "tamper.h"
 
@@ -28,15 +29,6 @@ void tamper_reset_all(void) {
   memset(region_count, 0, sizeof region_count);
 }
 
-static unsigned long long fnv1a(const unsigned char *bytes, long long len) {
-  unsigned long long hash = 1469598103934665603ULL;
-  for (long long i = 0; i < len; i++) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 static void drop(int file, int index) { regions[file][index] = regions[file][--region_count[file]]; }
 
 void tamper_note(int file, const char *file_name, long long offset, long long len) {
@@ -49,7 +41,7 @@ void tamper_note(int file, const char *file_name, long long offset, long long le
   regions[file][count].offset = offset;
   regions[file][count].len = len;
   regions[file][count].mask = 0;
-  regions[file][count].hash = fnv1a(bytes + offset, len);
+  regions[file][count].hash = fuzz_fnv1a(bytes + offset, (size_t)len);
   region_count[file] = count + 1;
 }
 
@@ -62,18 +54,18 @@ void tamper_flip(int file, const char *file_name, long long offset, unsigned cha
   unsigned char before = (unsigned char)(current ^ mask); /* What the byte was immediately before this flip. */
   for (int i = 0; i < region_count[file]; i++) {
     if (regions[file][i].len == 1 && regions[file][i].offset == offset) {
-      if (regions[file][i].hash == fnv1a(&before, 1)) {
+      if (regions[file][i].hash == fuzz_fnv1a(&before, 1)) {
         /* Nothing rewrote this byte since the region was last updated: chain onto the running mask. */
         regions[file][i].mask ^= mask;
         if (regions[file][i].mask == 0) {
           drop(file, i); /* This exact flip history at this offset now cancels to nothing. */
         } else {
-          regions[file][i].hash = fnv1a(&current, 1);
+          regions[file][i].hash = fuzz_fnv1a(&current, 1);
         }
       } else {
         /* Something else rewrote this byte since: the old region is stale, start fresh from this flip alone. */
         regions[file][i].mask = mask;
-        regions[file][i].hash = fnv1a(&current, 1);
+        regions[file][i].hash = fuzz_fnv1a(&current, 1);
       }
       return;
     }
@@ -83,7 +75,7 @@ void tamper_flip(int file, const char *file_name, long long offset, unsigned cha
   regions[file][count].offset = offset;
   regions[file][count].len = 1;
   regions[file][count].mask = mask;
-  regions[file][count].hash = fnv1a(&current, 1);
+  regions[file][count].hash = fuzz_fnv1a(&current, 1);
   region_count[file] = count + 1;
 }
 
@@ -173,7 +165,7 @@ void tamper_check(const struct fuzz_sqlite *api, sqlite3 *db, int file, const ch
   for (int i = 0; i < region_count[file]; i++) {
     long long start = regions[file][i].offset, end = start + regions[file][i].len;
     if (end > (long long)have) continue; /* The file shrank since; nothing to compare against. */
-    if (fnv1a(bytes + start, regions[file][i].len) != regions[file][i].hash) continue; /* Since rewritten, healed. */
+    if (fuzz_fnv1a(bytes + start, (size_t)regions[file][i].len) != regions[file][i].hash) continue; /* Since rewritten, healed. */
     for (int pgno = page_of(start, page_size); (long long)(pgno - 1) * page_size < end; pgno++) {
       long long page_start = (long long)(pgno - 1) * page_size;
       long long populated_end =
@@ -191,7 +183,7 @@ void tamper_check(const struct fuzz_sqlite *api, sqlite3 *db, int file, const ch
 unsigned long long tamper_hash_file(const char *file_name) {
   size_t len = 0;
   const unsigned char *bytes = memvfs_peek(file_name, &len);
-  return bytes ? fnv1a(bytes, (long long)len) : 0;
+  return bytes ? fuzz_fnv1a(bytes, len) : 0;
 }
 
 void tamper_check_wrong_key(int rc, unsigned long long before_hash, const char *file_name) {

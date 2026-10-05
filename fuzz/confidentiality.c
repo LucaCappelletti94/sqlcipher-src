@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include "confidentiality.h"
+#include "libstate.h"
 #include "memvfs.h"
 #include "script.h"
 
@@ -55,15 +56,6 @@ void confidentiality_mark_keyed(int file) {
   expect_encrypted[file] = 1;
 }
 
-static void hexenc(char *out, const unsigned char *bytes, int len) {
-  static const char digits[] = "0123456789abcdef";
-  for (int i = 0; i < len; i++) {
-    out[2 * i] = digits[bytes[i] >> 4];
-    out[2 * i + 1] = digits[bytes[i] & 15];
-  }
-  out[2 * len] = 0;
-}
-
 void confidentiality_plant(const struct fuzz_sqlite *api, sqlite3 *db) {
   if (!db || marker_count >= MAX_MARKERS) return;
   unsigned char marker[MARKER_LEN];
@@ -71,7 +63,7 @@ void confidentiality_plant(const struct fuzz_sqlite *api, sqlite3 *db) {
   unsigned long long value = next_seq();
   for (int i = 0; i < 8; i++) marker[8 + i] = (unsigned char)(value >> (8 * i));
   char hex[2 * MARKER_LEN + 1];
-  hexenc(hex, marker, MARKER_LEN);
+  fuzz_hex(hex, marker, MARKER_LEN);
   char sql[256];
   snprintf(sql, sizeof sql, "CREATE TABLE canary_%s(v_%s BLOB, t_%s TEXT)", hex, hex, hex);
   sqlite3_stmt *stmt = NULL;

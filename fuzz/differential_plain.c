@@ -3,12 +3,12 @@
    independently written databases' logical content. build.sh names the two builds' tables in FUZZ_LIBTOMCRYPT and
    FUZZ_PLAIN; FUZZ_PLAIN is always the shared release build, since the comparison is about the codec layer, which
    plain SQLite has none of, not about which SQLCipher commit is under test. */
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "confidentiality.h"
 #include "fault.h"
+#include "libstate.h"
 #include "memvfs.h"
 #include "model.h"
 #include "random.h"
@@ -26,28 +26,11 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
   return 0;
 }
 
-static void report(int file, const struct dump *cipher, const struct dump *plain) {
-  size_t at = 0;
-  while (at < cipher->len && at < plain->len && cipher->bytes[at] == plain->bytes[at]) at++;
-  fprintf(stderr, "file %d: cipher read %zu bytes, plain read %zu, first difference at %zu\n", file, cipher->len,
-          plain->len, at);
-}
-
-static void reset_all(void) {
-  memvfs_reset();
-  tamper_reset_all();
-  confidentiality_reset();
-  uniqueness_reset();
-  model_reset();
-  fault_reset();
-  fuzz_random_reset();
-}
-
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   struct input cipher_in = {data, size};
   struct input plain_in = {data, size};
 
-  reset_all();
+  fuzz_reset_all();
   script_reset(&FUZZ_LIBTOMCRYPT);
   script_run(&FUZZ_LIBTOMCRYPT, &cipher_in, SCRIPT_STRUCTURED);
   int exempt[SCRIPT_FILES];
@@ -56,7 +39,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   struct dump cipher_dump[SCRIPT_FILES] = {{0}};
   for (int file = 0; file < SCRIPT_FILES; file++) script_dump_content(&FUZZ_LIBTOMCRYPT, file, &cipher_dump[file]);
 
-  reset_all();
+  fuzz_reset_all();
   script_reset(&FUZZ_PLAIN);
   script_run(&FUZZ_PLAIN, &plain_in, SCRIPT_STRUCTURED);
   for (int file = 0; file < SCRIPT_FILES; file++) {
@@ -67,7 +50,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
                  (cipher_dump[file].len == 0 ||
                   memcmp(cipher_dump[file].bytes, plain_dump.bytes, cipher_dump[file].len) == 0);
       if (!same) {
-        report(file, &cipher_dump[file], &plain_dump);
+        fuzz_report_first_difference(file, "cipher", &cipher_dump[file], "plain", &plain_dump);
         abort();
       }
     }

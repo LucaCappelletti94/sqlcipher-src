@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "libstate.h"
 #include "model.h"
 
 #define MAX_TABLES 64
@@ -58,29 +59,10 @@ void model_note_damage(int file) {
 
 void model_discard(void) { scratch_valid = 0; }
 
-static unsigned long long fnv1a(const unsigned char *bytes, size_t len) {
-  unsigned long long hash = 1469598103934665603ULL;
-  for (size_t i = 0; i < len; i++) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 static void put(struct buf *b, const void *bytes, size_t len) {
-  if (b->len + len > MAX_ROW_BYTES) return; /* A budget guard, not a correctness gate: silently caps how much of a
-                                                pathologically large table's rows feed the hash, the same way
-                                                script.c's own MAX_DUMP does for its read-back dump. */
-  if (b->len + len > b->cap) {
-    size_t cap = b->cap ? b->cap : 4096;
-    while (cap < b->len + len) cap *= 2;
-    unsigned char *grown = realloc(b->bytes, cap);
-    if (!grown) abort();
-    b->bytes = grown;
-    b->cap = cap;
-  }
-  memcpy(b->bytes + b->len, bytes, len);
-  b->len += len;
+  /* A budget guard, not a correctness gate: silently caps how much of a pathologically large table's rows feed
+     the hash, the same way script.c's own MAX_DUMP does for its read-back dump. */
+  fuzz_grow_append(&b->bytes, &b->len, &b->cap, MAX_ROW_BYTES, bytes, len);
 }
 
 static void put_row(const struct fuzz_sqlite *api, sqlite3_stmt *stmt, struct buf *b) {
@@ -128,7 +110,7 @@ static void take_snapshot(const struct fuzz_sqlite *api, sqlite3 *handle, const 
   out->count = count;
   out->rows_ok = 1;
   for (int i = 0; i < count; i++) {
-    out->tables[i].name_hash = fnv1a((const unsigned char *)names[i], strlen(names[i]));
+    out->tables[i].name_hash = fuzz_fnv1a((const unsigned char *)names[i], strlen(names[i]));
     char select[300];
     size_t at = (size_t)snprintf(select, sizeof select, "SELECT * FROM \"%s\".\"", schema);
     for (const char *c = names[i]; *c && at + 2 < sizeof select; c++) {
@@ -145,7 +127,7 @@ static void take_snapshot(const struct fuzz_sqlite *api, sqlite3 *handle, const 
       api->finalize(stmt);
     }
     if (row_rc != SQLITE_DONE) out->rows_ok = 0;
-    out->tables[i].content_hash = fnv1a(rows.bytes, rows.len);
+    out->tables[i].content_hash = fuzz_fnv1a(rows.bytes, rows.len);
     free(rows.bytes);
   }
 }

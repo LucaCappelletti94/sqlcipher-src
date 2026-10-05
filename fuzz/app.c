@@ -49,10 +49,6 @@ static int progress(void *unused) {
   return --budget < 0;
 }
 
-static int codec_page_size(sqlite3 *handle) {
-  return lib_int(lib, handle, "PRAGMA main.cipher_page_size");
-}
-
 sqlite3 *app_open(const struct fuzz_sqlite *api, const char *name, const struct rawfile *in, const char *key) {
   sqlite3 *handle = NULL;
   lib = api;
@@ -77,7 +73,7 @@ sqlite3 *app_open(const struct fuzz_sqlite *api, const char *name, const struct 
   if (in->use_hmac_off) lib_exec(lib, handle, "PRAGMA cipher_use_hmac = OFF");
   /* memvfs has no shared memory, so SQLite only opens a WAL under exclusive locking. */
   lib_exec(lib, handle, "PRAGMA locking_mode = EXCLUSIVE");
-  if (known_header_page_mismatch(major, memvfs_header_page_size(name), codec_page_size(handle))) { /* L8 */
+  if (known_header_page_mismatch(major, memvfs_header_page_size(name), fuzz_codec_page_size(lib, handle))) { /* L8 */
     lib->close_v2(handle);
     return NULL;
   }
@@ -117,7 +113,7 @@ static void reopen_and_read(const char *name, const struct rawfile *in, const ch
 static void backup(sqlite3 *source, const struct rawfile *in) {
   sqlite3 *dest = app_open(lib, "backup.db", in, NULL);
   if (!dest) return;
-  if (!known_backup_blocked(major, codec_page_size(source), codec_page_size(dest))) { /* L1 */
+  if (!known_backup_blocked(major, fuzz_codec_page_size(lib, source), fuzz_codec_page_size(lib, dest))) { /* L1 */
     sqlite3_backup *copy = lib->backup_init(dest, "main", source, "main");
     if (copy) {
       lib->backup_step(copy, -1);

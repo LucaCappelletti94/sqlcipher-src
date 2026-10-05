@@ -91,9 +91,13 @@ targets() {
         heaps=(_system_heap)
         plain_heap=_system_heap
     fi
-    target codec "codec$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt"
+    if [ "$msan" = 0 ]; then
+        target codec "codec$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt"
+    fi
     target codec "codec${suffix}_system_heap" -DFUZZ_LIBTOMCRYPT="${libtomcrypt}_system_heap"
-    target differential "differential$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL="$openssl"
+    if [ "$msan" = 0 ]; then
+        target differential "differential$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL="$openssl"
+    fi
     target differential_plain "differential_plain$suffix" -DFUZZ_LIBTOMCRYPT="$libtomcrypt$plain_heap" -DFUZZ_PLAIN=fuzz_sqlite_release_plain
     for heap in "${heaps[@]}"; do
         # shellcheck disable=SC2086

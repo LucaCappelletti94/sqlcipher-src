@@ -1,11 +1,11 @@
 /* One build writes, then both read the same bytes back, and any disagreement between libtomcrypt and OpenSSL aborts.
    build.sh names the two builds' tables in FUZZ_LIBTOMCRYPT and FUZZ_OPENSSL. */
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "confidentiality.h"
 #include "fault.h"
+#include "libstate.h"
 #include "memvfs.h"
 #include "model.h"
 #include "random.h"
@@ -24,26 +24,12 @@ int LLVMFuzzerInitialize(int *argc, char ***argv) {
   return 0;
 }
 
-static void report(int file, const struct dump *writer, const struct dump *reader, const char *writer_name,
-                   const char *reader_name) {
-  size_t at = 0;
-  while (at < writer->len && at < reader->len && writer->bytes[at] == reader->bytes[at]) at++;
-  fprintf(stderr, "file %d: %s read %zu bytes, %s read %zu, first difference at %zu\n", file, writer_name,
-          writer->len, reader_name, reader->len, at);
-}
-
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (!size) return 0;
   struct input in = {data + 1, size - 1};
   const struct fuzz_sqlite *writer = data[0] & 1 ? &FUZZ_OPENSSL : &FUZZ_LIBTOMCRYPT;
   const struct fuzz_sqlite *reader = data[0] & 1 ? &FUZZ_LIBTOMCRYPT : &FUZZ_OPENSSL;
-  memvfs_reset();
-  tamper_reset_all();
-  confidentiality_reset();
-  uniqueness_reset();
-  model_reset();
-  fault_reset();
-  fuzz_random_reset();
+  fuzz_reset_all();
   script_reset(writer);
   script_reset(reader);
   script_run(writer, &in, SCRIPT_STRUCTURED);
@@ -58,7 +44,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     int same = by_writer.len == by_reader.len &&
                (by_writer.len == 0 || memcmp(by_writer.bytes, by_reader.bytes, by_writer.len) == 0);
     if (!same) {
-      report(file, &by_writer, &by_reader, writer->name, reader->name);
+      fuzz_report_first_difference(file, writer->name, &by_writer, reader->name, &by_reader);
       abort();
     }
     dump_free(&by_writer);

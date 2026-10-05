@@ -7,15 +7,13 @@
 #include "random.h"
 #include "rawfile.h"
 
-#define MAX_PAGE 65536
 #define MAX_OUT (3 * 65536 + 64)
 
 static int page_count(const struct fuzz_sqlite *api, sqlite3 *db) {
   return lib_int(api, db, "PRAGMA page_count");
 }
 
-/* Reads page pgno through sqlite_dbpage into out and returns its length, or 0. */
-static int read_page(const struct fuzz_sqlite *api, sqlite3 *db, int pgno, uint8_t *out) {
+int pagemut_read_page(const struct fuzz_sqlite *api, sqlite3 *db, int pgno, uint8_t *out) {
   sqlite3_stmt *stmt = NULL;
   int len = 0;
   if (api->prepare_v2(db, "SELECT data FROM sqlite_dbpage WHERE pgno = ?1", -1, &stmt, NULL) != SQLITE_OK) return 0;
@@ -23,7 +21,7 @@ static int read_page(const struct fuzz_sqlite *api, sqlite3 *db, int pgno, uint8
   if (api->step(stmt) == SQLITE_ROW) {
     const void *bytes = api->column_blob(stmt, 0);
     len = api->column_bytes(stmt, 0);
-    if (!bytes || len <= 0 || len > MAX_PAGE) {
+    if (!bytes || len <= 0 || len > PAGEMUT_MAX_PAGE) {
       len = 0;
     } else {
       memcpy(out, bytes, (size_t)len);
@@ -47,7 +45,7 @@ static int write_page(const struct fuzz_sqlite *api, sqlite3 *db, int pgno, cons
 
 size_t pagemut_mutate(const struct fuzz_sqlite *api, uint8_t *data, size_t size, size_t max, unsigned seed,
                       size_t (*mutate)(uint8_t *, size_t, size_t)) {
-  static uint8_t page[MAX_PAGE];
+  static uint8_t page[PAGEMUT_MAX_PAGE];
   static uint8_t main_copy[65536];
   static uint8_t out[MAX_OUT];
   struct rawfile in;
@@ -63,7 +61,7 @@ size_t pagemut_mutate(const struct fuzz_sqlite *api, uint8_t *data, size_t size,
   size_t result = 0;
   if (pages > 0) {
     int pgno = (int)(seed % (unsigned)pages) + 1;
-    int len = read_page(api, db, pgno, page);
+    int len = pagemut_read_page(api, db, pgno, page);
     if (len > 0) {
       mutate(page, (size_t)len, (size_t)len);
       if (write_page(api, db, pgno, page, len) == SQLITE_OK) result = 1;

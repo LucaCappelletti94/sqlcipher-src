@@ -5,11 +5,11 @@
 #include "app.h"
 #include "libstate.h"
 #include "memvfs.h"
+#include "pagemut.h"
 #include "plaindiff.h"
 #include "random.h"
 
 #define MAX_PAGES 256
-#define MAX_PAGE 65536
 #define MAX_DUMP (1 << 20)
 #define MAX_TABLES 8
 #define BUDGET 20000
@@ -102,25 +102,15 @@ static void dump(const struct fuzz_sqlite *api, sqlite3 *db, struct dump *out) {
 
 /* Decodes every page of db through sqlite_dbpage into image and returns the image length, or 0. */
 static size_t decode_pages(const struct fuzz_sqlite *api, sqlite3 *db, unsigned char *image, size_t cap) {
+  static unsigned char page[PAGEMUT_MAX_PAGE];
   int pages = lib_int(api, db, "PRAGMA page_count");
   size_t at = 0;
   if (pages <= 0 || pages > MAX_PAGES) return 0;
   for (int pgno = 1; pgno <= pages; pgno++) {
-    sqlite3_stmt *stmt = NULL;
-    int ok = 0;
-    if (api->prepare_v2(db, "SELECT data FROM sqlite_dbpage WHERE pgno = ?1", -1, &stmt, NULL) != SQLITE_OK) return 0;
-    api->bind_int64(stmt, 1, pgno);
-    if (api->step(stmt) == SQLITE_ROW) {
-      const void *bytes = api->column_blob(stmt, 0);
-      int len = api->column_bytes(stmt, 0);
-      if (bytes && len > 0 && len <= MAX_PAGE && at + (size_t)len <= cap) {
-        memcpy(image + at, bytes, (size_t)len);
-        at += (size_t)len;
-        ok = 1;
-      }
-    }
-    api->finalize(stmt);
-    if (!ok) return 0;
+    int len = pagemut_read_page(api, db, pgno, page);
+    if (len <= 0 || at + (size_t)len > cap) return 0;
+    memcpy(image + at, page, (size_t)len);
+    at += (size_t)len;
   }
   return at;
 }

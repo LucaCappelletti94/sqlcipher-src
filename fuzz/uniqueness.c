@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "libstate.h"
 #include "memvfs.h"
 #include "uniqueness.h"
 
@@ -58,15 +59,6 @@ void uniqueness_note_explicit_salt(int file) {
   files_state[file].explicit_salt = 1;
 }
 
-static unsigned long long fnv1a(const unsigned char *bytes, size_t len) {
-  unsigned long long hash = 1469598103934665603ULL;
-  for (size_t i = 0; i < len; i++) {
-    hash ^= bytes[i];
-    hash *= 1099511628211ULL;
-  }
-  return hash;
-}
-
 static int pragma_int(const struct fuzz_sqlite *api, sqlite3 *db, const char *schema, const char *name, int *out) {
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA \"%s\".%s", schema, name);
@@ -119,7 +111,7 @@ static void check_ivs(int file, const char *file_name, int page_size, int reserv
                                                   leftover bytes remain past the last whole page belong to a
                                                   different page_size's layout, not a fresh page under this one. */
   struct file_state *st = &files_state[file];
-  unsigned long long whole_hash = fnv1a(bytes, have);
+  unsigned long long whole_hash = fuzz_fnv1a(bytes, have);
   if (st->has_bytes_hash && st->last_bytes_hash == whole_hash) return;
   st->last_bytes_hash = whole_hash;
   st->has_bytes_hash = 1;
@@ -131,7 +123,7 @@ static void check_ivs(int file, const char *file_name, int page_size, int reserv
     int all_zero = 1;
     for (int b = 0; b < unit_len && all_zero; b++) all_zero = bytes[unit_start + b] == 0;
     if (all_zero) continue; /* Never actually written through the codec, not a real draw: ledger L4's exemption. */
-    unsigned long long hash = fnv1a(bytes + unit_start, (size_t)unit_len);
+    unsigned long long hash = fuzz_fnv1a(bytes + unit_start, (size_t)unit_len);
     /* last_iv only tracks this many pages, the same bound tamper.c's own per-page scan uses: a file past it still
        gets every later page's IV checked against seen_iv below, just not the cheaper "unchanged since last look"
        skip a page within the tracked range gets, since writing past last_iv's own end would be the out-of-bounds
@@ -156,7 +148,7 @@ static void check_salt(int file, const char *file_name) {
   size_t have = 0;
   const unsigned char *bytes = memvfs_peek(file_name, &have);
   if (!bytes || have < IV_LEN) return;
-  unsigned long long hash = fnv1a(bytes, IV_LEN);
+  unsigned long long hash = fuzz_fnv1a(bytes, IV_LEN);
   struct file_state *st = &files_state[file];
   if (st->has_salt && st->last_salt == hash) return;
   for (int i = 0; i < seen_salt_count; i++) {
