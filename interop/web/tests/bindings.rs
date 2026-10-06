@@ -31,6 +31,19 @@ impl Db {
         assert_eq!(rc, ffi::SQLITE_OK);
     }
 
+    fn assert_secret(&self) {
+        // SAFETY: `self` keeps the live handle valid until the non-owning connection is dropped.
+        let db = unsafe { rusqlite::Connection::from_handle(self.0) }.unwrap();
+        db.query_row("SELECT v FROM t", [], |row| {
+            assert_eq!(
+                row.get_ref(0)?,
+                rusqlite::types::ValueRef::Text(b"bindings-secret")
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
+
     fn exec(&self, sql: &str) -> i32 {
         let sql = CString::new(sql).unwrap();
         unsafe {
@@ -66,22 +79,23 @@ fn bindings_key_and_rekey_the_shipped_sources() {
         assert_eq!(rc, ffi::SQLITE_OK);
     }
     let bytes = util.export_db("bindings.db").unwrap();
-    assert!(!bytes.is_empty());
     assert!(!bytes.starts_with(b"SQLite format 3"));
     assert!(!bytes.windows(15).any(|w| w == b"bindings-secret"));
+    util.import_db_unchecked("bindings-check.db", &bytes)
+        .unwrap();
     {
-        let db = Db::open("bindings.db");
+        let db = Db::open("bindings-check.db");
         db.key(OLD);
-        assert_eq!(db.exec("SELECT v FROM t"), ffi::SQLITE_OK);
+        db.assert_secret();
         db.rekey(NEW);
     }
-    let old = Db::open("bindings.db");
+    let old = Db::open("bindings-check.db");
     old.key(OLD);
     assert_eq!(
         old.exec("SELECT count(*) FROM sqlite_schema"),
         ffi::SQLITE_NOTADB
     );
-    let new = Db::open("bindings.db");
+    let new = Db::open("bindings-check.db");
     new.key(NEW);
-    assert_eq!(new.exec("SELECT v FROM t"), ffi::SQLITE_OK);
+    new.assert_secret();
 }
