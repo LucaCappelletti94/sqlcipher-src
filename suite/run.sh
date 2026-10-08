@@ -39,8 +39,9 @@ make sqlite3.c > make.log
 # SQLCipher needs SQLITE_TEMP_STORE=2, which sqlite-wasm-rs sets on its own command line.
 printf '#define SQLITE_TEMP_STORE 2\n#include "%s"\n' "$WRAPPER" > sqlite3.c
 # SQLITE_HAS_CODEC stops every file skipping itself, SQLCIPHER_TEST enables the error pragmas, FTS5 is used by export tests.
+# main.mk links with CFLAGS and never reads LDFLAGS, so the sanitizer flags in OPT reach the link from here.
 make testfixture CC="$CC" CFLAGS="$OPT -I$ROOT/sqlcipher -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
-    LDFLAGS="${SANITIZE:+$OPT}" > testfixture.log 2>&1
+    > testfixture.log 2>&1
 
 nm testfixture | grep -q sqlcipher_wasm_extra_init ||
     { echo "testfixture was not built from $WRAPPER" >&2; exit 1; }
