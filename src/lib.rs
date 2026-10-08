@@ -21,8 +21,10 @@ pub const HEADER_FILE: &str = "sqlite3.h";
 /// [`LIBTOMCRYPT_SOURCES`] need on the include path.
 pub const LIBTOMCRYPT_INCLUDE_DIR: &str = "libtomcrypt/headers";
 
-/// libtomcrypt files inside [`source_dir`], each compiled as its own translation unit with the build's `LTC_*`
-/// configuration, as upstream builds them. The tables they `#include` are left out.
+/// libtomcrypt files inside [`source_dir`], each compiled as its own translation unit.
+///
+/// Each needs `LTC_SOURCE` defined and the build's `LTC_*` configuration, as upstream builds them. The tables they
+/// `#include` are left out.
 pub const LIBTOMCRYPT_SOURCES: &[&str] = &include!("libtomcrypt_sources.rs");
 
 /// Directory holding the sources, at the path this crate was compiled from.

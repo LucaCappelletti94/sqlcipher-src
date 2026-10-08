@@ -19,7 +19,7 @@ assert!(dir.join(sqlcipher_src::SOURCE_FILE).is_file());
 assert!(dir.join(sqlcipher_src::HEADER_FILE).is_file());
 ```
 
-Builds without a system crypto library compile `SOURCE_FILE` with `-DSQLCIPHER_CRYPTO_LIBTOMCRYPT` and each file in `LIBTOMCRYPT_SOURCES` as its own translation unit, all with `LIBTOMCRYPT_INCLUDE_DIR` on the include path and one shared set of `LTC_*` switches:
+Builds without a system crypto library compile `SOURCE_FILE` with `-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_LIBTOMCRYPT` and each file in `LIBTOMCRYPT_SOURCES` as its own translation unit with `-DLTC_SOURCE`, all with `LIBTOMCRYPT_INCLUDE_DIR` on the include path and one shared set of `LTC_*` switches:
 
 ```rust
 let dir = sqlcipher_src::source_dir();
