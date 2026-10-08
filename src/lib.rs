@@ -17,6 +17,14 @@ pub const SOURCE_FILE: &str = "sqlcipher.c";
 /// Public SQLCipher header inside [`source_dir`].
 pub const HEADER_FILE: &str = "sqlite3.h";
 
+/// libtomcrypt's header directory inside [`source_dir`], which SQLCipher's `<tomcrypt.h>` and every file in
+/// [`LIBTOMCRYPT_SOURCES`] need on the include path.
+pub const LIBTOMCRYPT_INCLUDE_DIR: &str = "libtomcrypt/headers";
+
+/// libtomcrypt files inside [`source_dir`], each compiled as its own translation unit with the build's `LTC_*`
+/// configuration, as upstream builds them. The tables they `#include` are left out.
+pub const LIBTOMCRYPT_SOURCES: &[&str] = &include!("libtomcrypt_sources.rs");
+
 /// Directory holding the sources, at the path this crate was compiled from.
 #[must_use]
 pub fn source_dir() -> &'static Path {

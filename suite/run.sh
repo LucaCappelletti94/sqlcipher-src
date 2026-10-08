@@ -1,5 +1,5 @@
 #!/bin/sh -e
-# Runs SQLCipher's own test suite against the shipped sources in sqlite-wasm-rs's wrapper, so its libtomcrypt switch set meets SQLCipher's expectations.
+# Runs SQLCipher's own test suite against the shipped sources built as sqlite-wasm-rs builds them, so its libtomcrypt switch set meets SQLCipher's expectations.
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -25,10 +25,13 @@ if [ -n "${SANITIZE:-}" ]; then
 fi
 
 # The wrapper at the revision interop/web pins, as cargo resolves it.
-WRAPPER=$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT/interop/web/Cargo.toml" |
+SHIM=$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT/interop/web/Cargo.toml" |
     jq -r '.packages[] | select(.name == "sqlite-wasm-rs" and (.source | startswith("git+"))) | .manifest_path' |
-    xargs dirname)/shim/sqlcipher-wasm.c
-[ -f "$WRAPPER" ] || { echo "no sqlite-wasm-rs wrapper at $WRAPPER" >&2; exit 1; }
+    xargs dirname)/shim
+for unit in sqlcipher-wasm.c sqlcipher-entropy.c sqlcipher-ltc.h; do
+    [ -f "$SHIM/$unit" ] || { echo "no sqlite-wasm-rs $unit in $SHIM" >&2; exit 1; }
+done
+LTC="$ROOT/sqlcipher/libtomcrypt"
 
 trust_keys "$WORK"
 fetch_sqlcipher "$WORK"
@@ -37,14 +40,27 @@ cd "$WORK/sqlcipher"
 CC="$CC" ./configure ${TCL_LIB:+--with-tcl="$TCL_LIB"} > configure.log
 make sqlite3.c > make.log
 # SQLCipher needs SQLITE_TEMP_STORE=2, which sqlite-wasm-rs sets on its own command line.
-printf '#define SQLITE_TEMP_STORE 2\n#include "%s"\n' "$WRAPPER" > sqlite3.c
+printf '#define SQLITE_TEMP_STORE 2\n#include "%s"\n' "$SHIM/sqlcipher-wasm.c" > sqlite3.c
+# libtomcrypt one file per unit under the wrapper's switch set, then the entropy hook, as sqlite-wasm-rs links them.
+mkdir ltc
+# shellcheck disable=SC2016 # The inner sh expands them.
+sed -n 's/^ *"\(libtomcrypt\/.*\.c\)",$/\1/p' "$ROOT/src/libtomcrypt_sources.rs" |
+    OPT="$OPT" CC="$CC" SHIM="$SHIM" LTC="$LTC" ROOT="$ROOT" xargs -P "$(nproc)" -I {} sh -c \
+        'o="ltc/$(echo "$1" | tr / _).o"; $CC $OPT -include "$SHIM/sqlcipher-ltc.h" -DLTC_SOURCE -I"$LTC/headers" -c "$ROOT/sqlcipher/$1" -o "$o"' _ {}
+[ "$(find ltc -name '*.o' | wc -l)" -eq "$(grep -c '"libtomcrypt/' "$ROOT/src/libtomcrypt_sources.rs")" ] ||
+    { echo "not every libtomcrypt source compiled" >&2; exit 1; }
+# shellcheck disable=SC2086 # OPT holds several flags.
+$CC $OPT -I"$LTC/headers" -c "$SHIM/sqlcipher-entropy.c" -o ltc/entropy.o
 # SQLITE_HAS_CODEC stops every file skipping itself, SQLCIPHER_TEST enables the error pragmas, FTS5 is used by export tests.
 # main.mk links with CFLAGS and never reads LDFLAGS, so the sanitizer flags in OPT reach the link from here.
-make testfixture CC="$CC" CFLAGS="$OPT -I$ROOT/sqlcipher -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
-    > testfixture.log 2>&1
+# LDFLAGS.configure is the one variable main.mk appends to the testfixture link.
+make testfixture CC="$CC" CFLAGS="$OPT -I$ROOT/sqlcipher -I$LTC/headers -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
+    LDFLAGS.configure="$(echo "$PWD"/ltc/*.o)" > testfixture.log 2>&1
 
-nm testfixture | grep -q sqlcipher_wasm_extra_init ||
-    { echo "testfixture was not built from $WRAPPER" >&2; exit 1; }
+for symbol in sqlcipher_wasm_extra_init fortuna_start; do
+    nm testfixture | grep -q "$symbol" ||
+        { echo "testfixture lacks $symbol, so it was not built from $SHIM" >&2; exit 1; }
+done
 # A clean sanitizer run only counts if the binary is really instrumented.
 [ -z "${SANITIZE:-}" ] || { nm testfixture | grep -q __asan_report_load && nm testfixture | grep -q __ubsan_handle; } ||
     { echo "testfixture is not instrumented" >&2; exit 1; }
