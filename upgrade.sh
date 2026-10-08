@@ -12,5 +12,5 @@ fetch_sqlcipher "$WORK"
 fetch_libtomcrypt "$WORK"
 (cd "$WORK/sqlcipher" && ./configure > configure.log && make sqlite3.c > make.log)
 
-python3 "$ROOT/tools/assemble.py" "$WORK/sqlcipher" "$WORK/libtomcrypt" "$ROOT/sqlcipher"
+python3 "$ROOT/tools/assemble.py" "$WORK/sqlcipher" "$WORK/libtomcrypt" "$ROOT/sqlcipher" "$ROOT/src/libtomcrypt_sources.rs"
 python3 "$ROOT/tools/checksums.py" "$ROOT/sqlcipher"

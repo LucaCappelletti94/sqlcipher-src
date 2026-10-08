@@ -34,4 +34,6 @@ allow_attributes_without_reason = "warn"
 
 # The one pin of sqlite-wasm-rs's SQLCipher wrapper, which suite/run.sh builds too. Patched, so the git-pinned rusqlite shares it.
 [patch.crates-io]
-sqlite-wasm-rs = { git = "https://github.com/LucaCappelletti94/sqlite-wasm-rs", rev = "4915d509209a2c229c4d0fded5a43007e17aea9b" }
+sqlite-wasm-rs = { git = "https://github.com/LucaCappelletti94/sqlite-wasm-rs", rev = "1b7f5a1891e1eef335fd1274ed1a56b0ccf8c249" }
+# This checkout, so sqlite-wasm-rs compiles the LIBTOMCRYPT_SOURCES of the sources it is pointed at.
+sqlcipher-src = { path = "../.." }

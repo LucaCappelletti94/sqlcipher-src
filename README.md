@@ -19,7 +19,17 @@ assert!(dir.join(sqlcipher_src::SOURCE_FILE).is_file());
 assert!(dir.join(sqlcipher_src::HEADER_FILE).is_file());
 ```
 
-The `sqlcipher` feature of [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) builds from this crate for `wasm32-unknown-unknown`, pairing `SOURCE_FILE` with `libtomcrypt.c`.
+Builds without a system crypto library compile `SOURCE_FILE` with `-DSQLITE_HAS_CODEC -DSQLCIPHER_CRYPTO_LIBTOMCRYPT` and each file in `LIBTOMCRYPT_SOURCES` as its own translation unit with `-DLTC_SOURCE`, all with `LIBTOMCRYPT_INCLUDE_DIR` on the include path and one shared set of `LTC_*` switches:
+
+```rust
+let dir = sqlcipher_src::source_dir();
+assert!(dir.join(sqlcipher_src::LIBTOMCRYPT_INCLUDE_DIR).join("tomcrypt.h").is_file());
+for source in sqlcipher_src::LIBTOMCRYPT_SOURCES {
+    assert!(dir.join(source).is_file());
+}
+```
+
+The `sqlcipher` feature of [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) builds this way for `wasm32-unknown-unknown`.
 
 The sources are generated from signed SQLCipher and libtomcrypt releases by `upgrade.sh` and ship as released, except that `SOURCE_FILE` skips SQLCipher's `.fini_array` finalizer on `__wasm__`, which cannot hold that section, until [sqlcipher/sqlcipher#622](https://github.com/sqlcipher/sqlcipher/pull/622) is released. CI runs SQLCipher's and `rusqlite`'s SQLCipher tests on them natively, and checks through `sqlite-wasm-rs` that files written natively and in Node, Chrome and Firefox open on both sides.
 
