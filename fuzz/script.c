@@ -8,6 +8,7 @@
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
+#include "model.h"
 #include "script.h"
 #include "tamper.h"
 #include "uniqueness.h"
@@ -543,18 +544,24 @@ static void op_statement(struct input *in) {
   unsigned small = u8(in);
   struct input text = take(in, 256);
   if (!db) return;
+  int already_touched = touched;
   touched = 1;
+  int migrate = strcmp(statements[index], "PRAGMA cipher_migrate") == 0;
   /* Migration retries the passphrase at the legacy kdf_iter counts, far beyond a fuzz iteration's time. */
-  if (strcmp(statements[index], "PRAGMA cipher_migrate") == 0 && recipes[db_file].passphrase) return;
+  if (migrate && recipes[db_file].passphrase) return;
   if (vacuum_blocked(db, known_vacuum(statements[index], strlen(statements[index])))) return;
   sqlite3_stmt *stmt = NULL;
   if (lib->prepare_v2(db, statements[index], -1, &stmt, NULL) != SQLITE_OK) return;
   lib->bind_int64(stmt, 1, blob);
   lib->bind_int64(stmt, 2, small);
   lib->bind_text(stmt, 3, (const char *)text.data, (int)text.size, SQLITE_TRANSIENT);
+  int check = migrate && !known_migrate_poisons(already_touched);
+  if (check) model_snapshot(lib, db, "main", db_file);
   trusted = 1;
-  drain(stmt, NULL);
+  int rc = drain(stmt, NULL);
   trusted = 0;
+  if (check && rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "cipher_migrate");
+  else if (check) model_discard();
 }
 
 static void op_pragma(struct input *in) {
@@ -590,10 +597,17 @@ static void op_key(struct input *in, int rekey) {
   read_key(in, &key);
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
   if (!db || (touched && !rekey)) return;
+  if (rekey) model_snapshot(lib, db, "main", db_file);
   int rc = apply_key(db, "main", &key, rekey, NULL);
+  if (rekey && rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "rekey");
+  else if (rekey) model_discard();
   /* cipher_migrate needs the underived passphrase, which the first page access discards. */
   if (!rekey && rc == SQLITE_OK && !key.passphrase && key.migrate) {
-    run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
+    int check = !known_migrate_poisons(touched);
+    if (check) model_snapshot(lib, db, "main", db_file);
+    int migrate_rc = run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
+    if (check && migrate_rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "cipher_migrate");
+    else if (check) model_discard();
     touched = 1;
   }
   /* key_v2 never encrypts what the file already holds, so only a read that decodes proves the key, unlike rekey_v2. */
@@ -658,7 +672,20 @@ static void op_attach(struct input *in) {
     if (apply_setting(db, "aux", in, NULL) == SET_SALT) uniqueness_note_explicit_salt(file);
     record(file, STEP_SETTING, setting, in->data);
   }
-  run_trusted(db, PICK(in, moves), NULL);
+  unsigned move = u8(in) % (sizeof moves / sizeof *moves);
+  /* Export only adds tables, so the target must still hold every source table unchanged. Attach alters nothing. */
+  /* Export into aux reads main, every other move reads aux. */
+  if (move == 0) model_snapshot(lib, db, "main", db_file);
+  else model_snapshot(lib, db, "aux", file);
+  if (run_trusted(db, moves[move], NULL) != SQLITE_OK) {
+    model_discard();
+  } else if (move == 0) {
+    model_check_contains(lib, db, "aux", file, files[file], "sqlcipher_export");
+  } else if (move == 1) {
+    model_check_contains(lib, db, "main", db_file, files[db_file], "sqlcipher_export");
+  } else {
+    model_check(lib, db, "aux", file, files[file], "attach");
+  }
   uniqueness_check(lib, db, "aux", file, files[file]);
   run_trusted(db, "DETACH aux", NULL);
 }
@@ -687,8 +714,11 @@ static void op_backup(struct input *in) {
   }
   sqlite3_backup *backup = lib->backup_init(dest, "main", db, "main");
   if (backup) {
-    lib->backup_step(backup, -1);
+    model_snapshot(lib, db, "main", db_file);
+    int step_rc = lib->backup_step(backup, -1);
     lib->backup_finish(backup);
+    if (step_rc == SQLITE_DONE) model_check(lib, dest, "main", file, files[file], "backup");
+    else model_discard();
   }
   uniqueness_check(lib, dest, "main", file, files[file]);
   lib->close_v2(dest);
@@ -721,6 +751,7 @@ static void op_damage(struct input *in) {
   tamper_prune(file, memvfs_name(index));
   /* Raw damage writes input bytes, which mutators copy around, so an IV or salt there is no draw. */
   if (kind != 1) uniqueness_note_damage(file);
+  model_note_damage(file);
   if (kind == 0) {
     if (size) {
       memvfs_flip(index, at, (unsigned char)mask);
@@ -765,6 +796,7 @@ static void op_cache_race(struct input *in) {
   memvfs_flip(index, at, mask);
   tamper_flip(db_file, memvfs_name(index), at, mask);
   uniqueness_note_damage(db_file);
+  model_note_damage(db_file);
   if (kind == 0) {
     const uint8_t *start = in->data;
     struct key key;
@@ -827,11 +859,22 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
     case OP_REOPEN: {
       int file = db_file;
       if (file < 0) break;
+      /* close_v2 rolls back an open transaction, so only a connection in autocommit has a state to preserve. */
+      int check = lib->get_autocommit(db);
+      if (check) model_snapshot(lib, db, "main", file);
       close_db();
       db = open_file(file, 0);
-      if (!db) break;
+      if (!db) {
+        if (check) model_discard();
+        break;
+      }
       db_file = file;
-      if (replay(db, file, NULL)) close_db(); /* L8 */
+      if (replay(db, file, NULL)) { /* L8 */
+        close_db();
+        if (check) model_discard();
+      } else if (check) {
+        model_check(lib, db, "main", file, files[file], "reopen");
+      }
       break;
     }
     case OP_CLOSE:
