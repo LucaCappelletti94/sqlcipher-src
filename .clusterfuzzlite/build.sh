@@ -84,16 +84,19 @@ target() {
     $CC $CFLAGS -Wall -Wextra -Werror "$@" -c "$source.c" -o "$WORK/$binary.o"
 }
 
-for source in known libstate memvfs random script; do
+for source in app known libstate memvfs pagemut plaindiff random rawfile script; do
     # shellcheck disable=SC2086
     $CC $CFLAGS -Wall -Wextra -Werror -c "$source.c" -o "$WORK/$source.o"
 done
 script_units=("$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o")
+file_units=("$WORK/app.o" "$WORK/rawfile.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o")
 
 # The system heap lets AddressSanitizer see overflows that SQLCipher's private heap arena hides.
 spawn release libtomcrypt libtomcrypt.c "$WORK/libtomcrypt.o" "${WRAPPER[@]}"
 spawn release libtomcrypt_system_heap libtomcrypt.c "$WORK/libtomcrypt.o" "${WRAPPER[@]}" -DSQLCIPHER_OMIT_MALLOC
 spawn release openssl openssl.c "" -iquote ../sqlcipher
+# Plain SQLite from the same amalgamation, the reference keyed_file compares SQLCipher against.
+spawn release plain plain.c "" -iquote ../sqlcipher
 wait
 [ ! -e "$WORK/failed" ] || { echo "a SQLCipher library failed to compile" >&2; exit 1; }
 
@@ -104,6 +107,24 @@ for heap in "" _system_heap; do
     $CXX $CXXFLAGS "$WORK/codec$heap.o" "${script_units[@]}" "$WORK/release_libtomcrypt$heap.o" \
         $LIB_FUZZING_ENGINE -o "$OUT/codec$heap"
     cp codec.dict "$OUT/codec$heap.dict"
+    table="$libtomcrypt$heap" binary="hostile_file$heap" keyed="keyed_file$heap"
+    target hostile_file "$binary" -DFUZZ_LIBRARY_TABLE="$table"
+    target seedgen "seedgen$heap" -DFUZZ_LIBRARY_TABLE="$table"
+    target keyed_file "$keyed" -DFUZZ_LIBRARY_TABLE="$table" -DFUZZ_PLAIN_TABLE=fuzz_sqlite_release_plain
+    # shellcheck disable=SC2086
+    $CXX $CXXFLAGS "$WORK/$binary.o" "${file_units[@]}" "$WORK/release_libtomcrypt$heap.o" \
+        $LIB_FUZZING_ENGINE -o "$OUT/$binary"
+    # shellcheck disable=SC2086
+    $CXX $CXXFLAGS "$WORK/$keyed.o" "$WORK/pagemut.o" "$WORK/plaindiff.o" "${file_units[@]}" \
+        "$WORK/release_libtomcrypt$heap.o" "$WORK/release_plain.o" $LIB_FUZZING_ENGINE -o "$OUT/$keyed"
+    # shellcheck disable=SC2086
+    $CXX $CXXFLAGS "$WORK/seedgen$heap.o" "${file_units[@]}" "$WORK/release_libtomcrypt$heap.o" -o "$WORK/seedgen$heap"
+    # Each heap seeds from databases its own library wrote, and keyed_file reads the same file images.
+    mkdir -p "$WORK/seeds/$binary"
+    LLVM_PROFILE_FILE="$WORK/seedgen.profraw" "$WORK/seedgen$heap" "$WORK/seeds/$binary" "$SOURCES/release"
+    (cd "$WORK/seeds/$binary" && zip -q -r "$OUT/${binary}_seed_corpus.zip" .)
+    cp "$OUT/${binary}_seed_corpus.zip" "$OUT/${keyed}_seed_corpus.zip"
+    printf '[libfuzzer]\nmax_len = 200000\n' | tee "$OUT/$binary.options" > "$OUT/$keyed.options"
 done
 # OpenSSL links statically, since the runner image that executes the targets has no libcrypto.
 target differential differential -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL=fuzz_sqlite_release_openssl
