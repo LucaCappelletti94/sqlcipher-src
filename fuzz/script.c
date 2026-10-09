@@ -5,6 +5,7 @@
 #include <strings.h>
 
 #include "confidentiality.h"
+#include "fault.h"
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
@@ -44,7 +45,8 @@ enum op {
   OP_CACHE_RACE = 12,
   OP_RAW_SQL = 13,
   OP_CANARY = 14,
-  OP_COUNT = 15,
+  OP_FAULT_TXN = 15,
+  OP_COUNT = 16,
 };
 
 enum step_kind { STEP_KEY, STEP_SETTING };
@@ -814,6 +816,56 @@ static void op_cache_race(struct input *in) {
   }
 }
 
+/* Arms one fault, commits a write, then reopens, which must show exactly the state the connection saw afterwards. */
+static void op_fault_txn(struct input *in) {
+  static const enum fault_kind kinds[] = {FAULT_SHORT_READ, FAULT_SHORT_WRITE, FAULT_ENOSPC, FAULT_FSYNC,
+                                          FAULT_ALLOC};
+  if (!db || !lib->get_autocommit(db)) return;
+  /* L12: a commit with an attached schema of another cipher_page_size reads past main's page buffer. */
+  int main_page_size = lib_int(lib, db, "PRAGMA main.cipher_page_size");
+  int aux_page_size = lib_int(lib, db, "PRAGMA aux.cipher_page_size");
+  if (aux_page_size > 0 && aux_page_size != main_page_size) return;
+  touched = 1;
+  enum fault_kind kind = kinds[u8(in) % (sizeof kinds / sizeof *kinds)];
+  unsigned countdown = u8(in);
+  unsigned blob = u16(in) % (MAX_BLOB + 1);
+  fault_arm(kind, countdown);
+  int rc = run_trusted(db, "BEGIN IMMEDIATE", NULL);
+  if (rc == SQLITE_OK) rc = run_trusted(db, "CREATE TABLE IF NOT EXISTS t(a INTEGER PRIMARY KEY, b BLOB, c TEXT)", NULL);
+  if (rc == SQLITE_OK) {
+    sqlite3_stmt *stmt = NULL;
+    if (lib->prepare_v2(db, "INSERT INTO t(b, c) VALUES (randomblob(?1), ?3)", -1, &stmt, NULL) == SQLITE_OK) {
+      lib->bind_int64(stmt, 1, blob);
+      lib->bind_text(stmt, 3, "fault", -1, SQLITE_STATIC);
+      trusted = 1;
+      rc = drain(stmt, NULL);
+      trusted = 0;
+    } else {
+      rc = SQLITE_ERROR;
+    }
+  }
+  int commit_rc = run_trusted(db, "COMMIT", NULL);
+  fault_disarm();
+  int committed = rc == SQLITE_OK && commit_rc == SQLITE_OK;
+  if (!committed) run_trusted(db, "ROLLBACK", NULL);
+  int check = lib->get_autocommit(db);
+  if (check) model_snapshot(lib, db, "main", db_file);
+  int file = db_file;
+  close_db();
+  db = open_file(file, 0);
+  if (!db) {
+    if (check) model_discard();
+    return;
+  }
+  db_file = file;
+  if (replay(db, file, NULL)) { /* L8 */
+    close_db();
+    if (check) model_discard();
+  } else if (check) {
+    model_check(lib, db, "main", file, files[file], committed ? "fault-commit" : "fault-rollback");
+  }
+}
+
 static void op_raw_sql(struct input *in) {
   struct input text = take(in, MAX_RAW_SQL);
   char sql[MAX_RAW_SQL + 1];
@@ -920,6 +972,9 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       if (!db) break;
       touched = 1;
       confidentiality_plant(lib, db);
+      break;
+    case OP_FAULT_TXN:
+      op_fault_txn(in);
       break;
     case OP_COUNT:
       abort();

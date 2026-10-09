@@ -2,12 +2,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "fault.h"
 #include "libstate.h"
 #include "memvfs.h"
 #include "script.h"
 
 extern const struct fuzz_sqlite FUZZ_LIBTOMCRYPT;
 extern const struct fuzz_sqlite FUZZ_OPENSSL;
+
+int LLVMFuzzerInitialize(int *argc, char ***argv) {
+  (void)argc;
+  (void)argv;
+  fault_install(&FUZZ_LIBTOMCRYPT);
+  fault_install(&FUZZ_OPENSSL);
+  return 0;
+}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   if (!size) return 0;

@@ -1,8 +1,16 @@
 /* The shipped libtomcrypt build under the sanitizers, which see memory errors Wasm memory hides. */
+#include "fault.h"
 #include "libstate.h"
 #include "script.h"
 
 extern const struct fuzz_sqlite FUZZ_LIBTOMCRYPT;
+
+int LLVMFuzzerInitialize(int *argc, char ***argv) {
+  (void)argc;
+  (void)argv;
+  fault_install(&FUZZ_LIBTOMCRYPT);
+  return 0;
+}
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   struct input in = {data, size};

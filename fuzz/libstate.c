@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "confidentiality.h"
+#include "fault.h"
 #include "libstate.h"
 #include "memvfs.h"
 #include "model.h"
@@ -98,6 +99,7 @@ void fuzz_reset_all(void) {
   confidentiality_reset();
   uniqueness_reset();
   model_reset();
+  fault_reset();
   fuzz_random_reset();
 }
 

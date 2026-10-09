@@ -84,13 +84,13 @@ target() {
     $CC $CFLAGS -Wall -Wextra -Werror "$@" -c "$source.c" -o "$WORK/$binary.o"
 }
 
-for source in app confidentiality known libstate memvfs model pagemut plaindiff random rawfile script tamper uniqueness; do
+for source in app confidentiality fault known libstate memvfs model pagemut plaindiff random rawfile script tamper uniqueness; do
     # shellcheck disable=SC2086
     $CC $CFLAGS -Wall -Wextra -Werror -c "$source.c" -o "$WORK/$source.o"
 done
 # Every target links libstate, whose per-input reset clears each oracle's record.
 state_units=("$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o" "$WORK/confidentiality.o"
-    "$WORK/uniqueness.o" "$WORK/model.o")
+    "$WORK/uniqueness.o" "$WORK/model.o" "$WORK/fault.o")
 script_units=("$WORK/script.o" "${state_units[@]}")
 file_units=("$WORK/app.o" "$WORK/rawfile.o" "${state_units[@]}")
 
