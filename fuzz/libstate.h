@@ -23,8 +23,11 @@ int lib_int(const struct fuzz_sqlite *api, sqlite3 *handle, const char *sql);
 /* api's main database's codec page size on handle, or 0 when it has no codec. */
 int fuzz_codec_page_size(const struct fuzz_sqlite *api, sqlite3 *handle);
 
-/* Puts memvfs and the replayable entropy stream back to their reset state, before each input. */
+/* Puts memvfs, the tamper record and the replayable entropy stream back to their reset state, before each input. */
 void fuzz_reset_all(void);
+
+/* FNV-1a, a fingerprint cheap enough to take of every region and file an oracle tracks. */
+unsigned long long fuzz_fnv1a(const unsigned char *bytes, size_t len);
 
 /* Appends to a doubling buffer, dropping appends past max and aborting when allocation fails. */
 void fuzz_grow_append(unsigned char **bytes, size_t *len, size_t *cap, size_t max, const void *data, size_t add_len);

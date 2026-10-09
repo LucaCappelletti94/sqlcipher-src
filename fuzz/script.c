@@ -8,6 +8,7 @@
 #include "libstate.h"
 #include "memvfs.h"
 #include "script.h"
+#include "tamper.h"
 
 #define MAX_OPS 64
 #define MAX_RECIPE 16
@@ -37,6 +38,7 @@ enum op {
   OP_BACKUP = 9,
   OP_DAMAGE = 10,
   OP_READ = 11,
+  OP_CACHE_RACE = 12,
   OP_RAW_SQL = 13,
   OP_COUNT = 14,
 };
@@ -196,6 +198,38 @@ static int drain(sqlite3_stmt *stmt, struct dump *out) {
   while ((rc = lib->step(stmt)) == SQLITE_ROW) dump_row(stmt, out);
   lib->finalize(stmt);
   return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+
+/* A read of schema's page 1, returning the step's result code, which fails when the key does not match the file. */
+static int key_verified(sqlite3 *handle, const char *schema) {
+  char sql[64];
+  snprintf(sql, sizeof sql, "PRAGMA \"%s\".schema_version", schema);
+  sqlite3_stmt *stmt = NULL;
+  int rc = lib->prepare_v2(handle, sql, -1, &stmt, NULL);
+  if (rc != SQLITE_OK) return rc;
+  rc = lib->step(stmt);
+  lib->finalize(stmt);
+  return rc;
+}
+
+/* Whether file has a non-empty journal or WAL, which any first page access rolls into it whatever the key. */
+static int has_pending_recovery(int file) {
+  char name[64];
+  size_t len = 0;
+  snprintf(name, sizeof name, "%s-journal", files[file]);
+  memvfs_peek(name, &len);
+  if (len) return 1;
+  snprintf(name, sizeof name, "%s-wal", files[file]);
+  memvfs_peek(name, &len);
+  return len != 0;
+}
+
+/* Reads through the key just applied on schema, and checks a mismatch left file's bytes untouched. */
+static void verify_key(sqlite3 *handle, const char *schema, int file) {
+  unsigned long long before = tamper_hash_file(files[file]);
+  int recovery = has_pending_recovery(file);
+  int rc = key_verified(handle, schema);
+  if (!recovery) tamper_check_wrong_key(rc, before, files[file]);
 }
 
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
@@ -545,6 +579,10 @@ static void op_key(struct input *in, int rekey) {
     run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
     touched = 1;
   }
+  if (!rekey && rc == SQLITE_OK) {
+    verify_key(db, "main", db_file);
+    touched = 1;
+  }
   record(db_file, STEP_KEY, start, in->data);
 }
 
@@ -585,6 +623,7 @@ static void op_attach(struct input *in) {
   int rc = drain(stmt, NULL);
   trusted = 0;
   if (rc != SQLITE_OK) return;
+  verify_key(db, "aux", file);
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
@@ -609,7 +648,7 @@ static void op_backup(struct input *in) {
   if (!dest) return;
   recipes[file].count = 0;
   recipes[file].passphrase = key.passphrase;
-  apply_key(dest, "main", &key, 0, NULL);
+  if (apply_key(dest, "main", &key, 0, NULL) == SQLITE_OK) verify_key(dest, "main", file);
   record(file, STEP_KEY, start, in->data);
   if (known_backup_blocked(major, fuzz_codec_page_size(lib, db), fuzz_codec_page_size(lib, dest))) {
     lib->close_v2(dest);
@@ -621,6 +660,15 @@ static void op_backup(struct input *in) {
     lib->backup_finish(backup);
   }
   lib->close_v2(dest);
+}
+
+/* The script file index memvfs slot index names, or -1 for a temp or super-journal file. */
+static int file_of_memvfs(int index) {
+  const char *name = memvfs_name(index);
+  for (int i = 0; i < SCRIPT_FILES; i++) {
+    if (strcmp(files[i], name) == 0) return i;
+  }
+  return -1;
 }
 
 static void op_damage(struct input *in) {
@@ -637,12 +685,62 @@ static void op_damage(struct input *in) {
                                    : (long long)(offset % (unsigned long long)(size + 1));
   long long len = kind == 0 ? 1 : kind == 2 ? (long long)chunk.size : 0;
   if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, len)) return;
+  int file = file_of_memvfs(index);
+  tamper_prune(file, memvfs_name(index));
   if (kind == 0) {
-    if (size) memvfs_flip(index, at, (unsigned char)mask);
+    if (size) {
+      memvfs_flip(index, at, (unsigned char)mask);
+      tamper_flip(file, memvfs_name(index), at, (unsigned char)mask);
+    }
   } else if (kind == 1) {
     memvfs_truncate(index, at);
   } else {
     memvfs_overwrite(index, at, chunk.data, chunk.size);
+    if (chunk.size) tamper_note(file, memvfs_name(index), at, len);
+  }
+}
+
+/* Tampers a page of the open file, cached or not, then copies pages with a rekey, a backup or VACUUM. */
+static void op_cache_race(struct input *in) {
+  unsigned warm = u8(in) & 1;
+  unsigned target = u8(in);
+  unsigned kind = u8(in) % 3;
+  unsigned char mask = u8(in) | 1;
+  unsigned page_offset = u16(in);
+  if (!db) return;
+  int count = memvfs_count();
+  if (!count) return;
+  int index = (int)(target % (unsigned)count);
+  if (file_of_memvfs(index) != db_file) return;
+  long long size = memvfs_size(index);
+  int page_size = fuzz_codec_page_size(lib, db);
+  if (!size || page_size <= 0) return;
+  long long pgno = size / page_size ? (long long)(u32(in) % (unsigned long long)(size / page_size)) + 1 : 1;
+  long long at = (pgno - 1) * page_size + (long long)(page_offset % (unsigned)page_size);
+  if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, 1)) return;
+  touched = 1;
+  if (warm) {
+    sqlite3_stmt *stmt = NULL;
+    if (lib->prepare_v2(db, "SELECT data FROM sqlite_dbpage WHERE pgno = ?1", -1, &stmt, NULL) == SQLITE_OK) {
+      lib->bind_int64(stmt, 1, pgno);
+      lib->step(stmt);
+      lib->finalize(stmt);
+    }
+  }
+  tamper_prune(db_file, memvfs_name(index));
+  memvfs_flip(index, at, mask);
+  tamper_flip(db_file, memvfs_name(index), at, mask);
+  if (kind == 0) {
+    const uint8_t *start = in->data;
+    struct key key;
+    read_key(in, &key);
+    apply_key(db, "main", &key, 1, NULL);
+    record(db_file, STEP_KEY, start, in->data);
+    if (key.passphrase) recipes[db_file].passphrase = 1;
+  } else if (kind == 1) {
+    op_backup(in);
+  } else if (!vacuum_blocked(db, known_vacuum("VACUUM", 6))) {
+    run(db, "VACUUM", NULL);
   }
 }
 
@@ -727,7 +825,11 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
     case OP_READ:
       if (!db) break;
       touched = 1;
+      /* Unchecked, since this connection may still cache a page from before a later OP_DAMAGE. */
       read_all(db, NULL);
+      break;
+    case OP_CACHE_RACE:
+      op_cache_race(in);
       break;
     case OP_RAW_SQL:
       op_raw_sql(in);
@@ -745,6 +847,9 @@ void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
   sqlite3 *handle = open_file(file, 0);
   dump_code(out, handle ? SQLITE_OK : SQLITE_CANTOPEN);
   if (!handle) return;
-  if (!replay(handle, file, out)) read_all(handle, out); /* L8 */
+  if (!replay(handle, file, out)) { /* L8 */
+    read_all(handle, out);
+    tamper_check(lib, handle, file, files[file]);
+  }
   lib->close_v2(handle);
 }
