@@ -3,18 +3,11 @@ use sqlite_wasm_rs as ffi;
 use sqlite_wasm_rs::vfs::memvfs::MemVfsUtil;
 use sqlite_wasm_rs::vfs::transfer::DbTransfer;
 use std::ffi::{CStr, CString};
-use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-#[wasm_bindgen(module = "fs")]
-extern "C" {
-    #[wasm_bindgen(js_name = readFileSync)]
-    fn read_file_sync(path: &str) -> Vec<u8>;
-    #[wasm_bindgen(js_name = writeFileSync)]
-    fn write_file_sync(path: &str, data: &[u8]);
-}
+pub mod common;
+use common::{keyed, read_file_sync, write_file_sync, DIR};
 
-const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures");
 const RAW: &str =
     "PRAGMA key = \"x'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\"";
 const PASS: &str = "PRAGMA key = 'correct horse battery staple'";
@@ -102,7 +95,7 @@ fn sqlcipher_is_compiled_in() {
     let p = db.one("PRAGMA cipher_provider").unwrap();
     assert!(
         v.as_deref()
-            .is_some_and(|v| v.starts_with(&format!("{} ", sqlcipher_src::SQLCIPHER_VERSION))),
+            .is_some_and(|v| v.starts_with(&format!("{} ", interop_web::SQLCIPHER_VERSION))),
         "{v:?}"
     );
     assert_eq!(p.as_deref(), Some("libtomcrypt"));
@@ -115,7 +108,7 @@ fn reads_native_and_writes_for_native() {
         util.import_db_unchecked(name, &read_file_sync(&format!("{DIR}/{name}")))
             .unwrap();
         let db = Db::open(name);
-        db.exec(key);
+        db.exec(&keyed(key));
         assert_eq!(
             db.one("SELECT v FROM t").unwrap().as_deref(),
             Some("written natively")
@@ -130,7 +123,7 @@ fn reads_native_and_writes_for_native() {
     for (name, key) in [("web-raw.db", RAW), ("web-pass.db", PASS)] {
         {
             let db = Db::open(name);
-            db.exec(key);
+            db.exec(&keyed(key));
             db.exec("CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('written in the browser');");
         }
         let bytes = util.export_db(name).unwrap();
@@ -156,7 +149,7 @@ fn rekey_from_raw_to_pass() {
     .unwrap();
     {
         let db = Db::open("rekey-raw.db");
-        db.exec(RAW);
+        db.exec(&keyed(RAW));
         db.exec(REKEY_PASS);
     }
     let bytes = util.export_db("rekey-raw.db").unwrap();
@@ -178,7 +171,7 @@ fn rekey_from_pass_to_raw() {
     .unwrap();
     {
         let db = Db::open("rekey-pass.db");
-        db.exec(PASS);
+        db.exec(&keyed(PASS));
         db.exec(REKEY_RAW);
     }
     let bytes = util.export_db("rekey-pass.db").unwrap();
@@ -238,7 +231,7 @@ fn cipher_integrity_check_native_files() {
         util.import_db_unchecked(&vfs_name, &read_file_sync(&format!("{DIR}/{name}")))
             .unwrap();
         let db = Db::open(&vfs_name);
-        db.exec(key);
+        db.exec(&keyed(key));
         assert_eq!(
             db.one("PRAGMA cipher_integrity_check").unwrap(),
             None,

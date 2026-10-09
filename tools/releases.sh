@@ -1,9 +1,17 @@
 # shellcheck shell=sh
-# Pinned upstream releases and their verified fetch, sourced by upgrade.sh and suite/run.sh with ROOT set.
+# Pinned upstream releases and their verified fetch, sourced with ROOT set.
 
 SQLCIPHER_VERSION="4.19.0"
 # A signed tag moved to another commit still fails.
 SQLCIPHER_COMMIT="c4b275a47932888216bade83aff2bbc73df0ff85"
+# The newest signed pre-release tag of the next major line, which sqlcipher-release.yml moves and CI tests but nothing ships.
+# shellcheck disable=SC2034 # tools/leg.sh reads both.
+SQLCIPHER_NEXT_VERSION="5.0.0-beta"
+# shellcheck disable=SC2034
+SQLCIPHER_NEXT_COMMIT="02051d3d35b1e8d084670a7566c92f037e21399e"
+# 5.x takes URI filenames, refuses direct overflow reads, and authenticates pages with AES-GCM keyed through OMAC.
+# shellcheck disable=SC2034 # tools/leg.sh writes it to leg.env, and suite/run.sh passes it to every unit.
+SQLCIPHER_LEG_FLAGS="-DSQLITE_USE_URI=1 -DSQLITE_DIRECT_OVERFLOW_READ=0 -DLTC_GCM_MODE -DLTC_OMAC"
 # Stephen Lombardo's key from keys.openpgp.org, in keys/sqlcipher.asc.
 SQLCIPHER_SIGNER="D92204901CD8BFDF63A2D9F952E8883F1591F4CE"
 LIBTOMCRYPT_VERSION="1.18.2"
@@ -26,18 +34,22 @@ signed_by() {
         END { exit !(ok && !revoked) }'
 }
 
-# Writes the SQLCipher tree at the verified tag's commit to $1/sqlcipher.
-fetch_sqlcipher() {
+# Writes the SQLCipher tree at signed tag v$2, which must point at commit $3, to $1/sqlcipher.
+fetch_sqlcipher_tag() {
     git init --quiet "$1/sqlcipher.git"
     git -C "$1/sqlcipher.git" fetch --quiet --depth 1 https://github.com/sqlcipher/sqlcipher.git \
-        "refs/tags/v${SQLCIPHER_VERSION}:refs/tags/v${SQLCIPHER_VERSION}"
-    git -C "$1/sqlcipher.git" verify-tag --raw "v${SQLCIPHER_VERSION}" 2>&1 | signed_by "$SQLCIPHER_SIGNER" ||
-        { echo "SQLCipher v${SQLCIPHER_VERSION} carries no valid signature from ${SQLCIPHER_SIGNER}" >&2; exit 1; }
-    tagged=$(git -C "$1/sqlcipher.git" rev-parse "v${SQLCIPHER_VERSION}^{commit}")
-    [ "$tagged" = "$SQLCIPHER_COMMIT" ] ||
-        { echo "SQLCipher v${SQLCIPHER_VERSION} points at ${tagged}, not ${SQLCIPHER_COMMIT}" >&2; exit 1; }
+        "refs/tags/v$2:refs/tags/v$2"
+    git -C "$1/sqlcipher.git" verify-tag --raw "v$2" 2>&1 | signed_by "$SQLCIPHER_SIGNER" ||
+        { echo "SQLCipher v$2 carries no valid signature from ${SQLCIPHER_SIGNER}" >&2; exit 1; }
+    tagged=$(git -C "$1/sqlcipher.git" rev-parse "v$2^{commit}")
+    [ "$tagged" = "$3" ] || { echo "SQLCipher v$2 points at ${tagged}, not $3" >&2; exit 1; }
     mkdir "$1/sqlcipher"
-    git -C "$1/sqlcipher.git" archive "$SQLCIPHER_COMMIT" | tar x -C "$1/sqlcipher"
+    git -C "$1/sqlcipher.git" archive "$3" | tar x -C "$1/sqlcipher"
+}
+
+# Writes the SQLCipher tree of the pinned release to $1/sqlcipher.
+fetch_sqlcipher() {
+    fetch_sqlcipher_tag "$1" "$SQLCIPHER_VERSION" "$SQLCIPHER_COMMIT"
 }
 
 # Writes the verified libtomcrypt release tree to $1/libtomcrypt.

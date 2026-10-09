@@ -8,11 +8,11 @@ publish = false
 description = "Runs SQLCipher built from this crate inside sqlite-wasm-rs under Node.js"
 
 [dependencies]
+sqlcipher-src = { path = "../.." }
 sqlite-wasm-rs = { version = "0.6", features = ["wasm-bindgen", "sqlcipher"] }
 wasm-bindgen = "0.2"
 
 [dev-dependencies]
-sqlcipher-src = { path = "../.." }
 js-sys = "0.3"
 # Released 0.40.2 pins sqlite-wasm-rs 0.5, which has no SQLITE_WASM_RS_SOURCE_DIR.
 rusqlite = { git = "https://github.com/rusqlite/rusqlite", rev = "b6476751216cb8569a3f747611f37a394a8de4e3" }

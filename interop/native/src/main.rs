@@ -37,7 +37,13 @@ fn assert_integrity(db: &Connection, name: &str) {
     );
 }
 
-/// Passes when errors is empty or contains only the HMAC-disabled message.
+/// Messages `cipher_integrity_check` gives for a file with no page authentication, from SQLCipher 4 and 5.
+const NO_AUTHENTICATION: [&str; 2] = [
+    "HMAC is not enabled, unable to integrity check",
+    "Authentication is not enabled, unable to integrity check",
+];
+
+/// Passes when errors is empty or contains only the no-authentication message.
 fn assert_setting_integrity(db: &Connection, name: &str) {
     let errors: Vec<String> = db
         .prepare("PRAGMA cipher_integrity_check")
@@ -47,8 +53,11 @@ fn assert_setting_integrity(db: &Connection, name: &str) {
         .collect::<Result<_, _>>()
         .unwrap();
     // cipher_use_hmac = OFF and compat1 always return one fixed message instead of an empty result
-    let ok = errors.is_empty()
-        || errors.as_slice() == ["HMAC is not enabled, unable to integrity check"];
+    let ok = match errors.as_slice() {
+        [] => true,
+        [message] => NO_AUTHENTICATION.contains(&message.as_str()),
+        _ => false,
+    };
     assert!(ok, "{name}: cipher_integrity_check: {errors:?}");
 }
 
@@ -92,17 +101,24 @@ const SETTING_CASES: &[SettingCase] = &[
         check_fail: true,
         uses_salt: false,
     },
+    // 5.x authenticates pages with AEAD, where HMAC settings do nothing, so these switch HMAC on as 4.x has it by default.
     SettingCase {
         slug: "hmacsha1",
         key: PASS,
-        pragmas: &["PRAGMA cipher_hmac_algorithm = HMAC_SHA1"],
+        pragmas: &[
+            "PRAGMA cipher_use_hmac = ON",
+            "PRAGMA cipher_hmac_algorithm = HMAC_SHA1",
+        ],
         check_fail: true,
         uses_salt: false,
     },
     SettingCase {
         slug: "hmacsha256",
         key: PASS,
-        pragmas: &["PRAGMA cipher_hmac_algorithm = HMAC_SHA256"],
+        pragmas: &[
+            "PRAGMA cipher_use_hmac = ON",
+            "PRAGMA cipher_hmac_algorithm = HMAC_SHA256",
+        ],
         check_fail: true,
         uses_salt: false,
     },
@@ -127,10 +143,11 @@ const SETTING_CASES: &[SettingCase] = &[
         check_fail: true,
         uses_salt: true,
     },
+    // 4.x has no cipher_aead and ignores it, while 5.x needs it off before a page can go unauthenticated.
     SettingCase {
         slug: "nohmac",
         key: PASS,
-        pragmas: &["PRAGMA cipher_use_hmac = OFF"],
+        pragmas: &["PRAGMA cipher_aead = OFF", "PRAGMA cipher_use_hmac = OFF"],
         check_fail: true,
         uses_salt: false,
     },
@@ -290,6 +307,9 @@ fn read_one(dir: &str, name: &str, db: &Connection, expected: &str, wrong_key: &
 }
 
 fn cmd_write(dir: &str) {
+    // The Wasm side reads this to open and write these files in the format an older major reads by default.
+    let version = cipher_version(&Connection::open_in_memory().unwrap());
+    std::fs::write(format!("{dir}/native-version"), &version).unwrap();
     for (name, key) in [
         ("native-raw.db", RAW),
         ("native-pass.db", PASS),

@@ -1,5 +1,6 @@
 #!/bin/sh -e
 # Runs SQLCipher's own test suite against the shipped sources built as sqlite-wasm-rs builds them, so its libtomcrypt switch set meets SQLCipher's expectations.
+# A leg of tools/leg.sh sets SQLCIPHER_TREE to its SQLCipher tree and SQLCIPHER_DIR to its generated sources.
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -7,6 +8,12 @@ ROOT=$(pwd)
 . "$ROOT/tools/releases.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
+SOURCES=${SQLCIPHER_DIR:-$ROOT/sqlcipher}
+# A leg's switches reach the amalgamation and every libtomcrypt unit, so the struct layouts agree.
+LEGFLAGS=
+if [ -n "${SQLCIPHER_DIR:-}" ]; then
+    LEGFLAGS=$SQLCIPHER_LEG_FLAGS
+fi
 
 # sqlcipher-template holds no tests, and sqlcipher-threads races under the shipped SQLITE_MUTEX_NOOP.
 SKIP_FILES="sqlcipher-template sqlcipher-threads"
@@ -31,10 +38,14 @@ SHIM=$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT/interop
 for unit in sqlcipher-wasm.c sqlcipher-entropy.c sqlcipher-ltc.h; do
     [ -f "$SHIM/$unit" ] || { echo "no sqlite-wasm-rs $unit in $SHIM" >&2; exit 1; }
 done
-LTC="$ROOT/sqlcipher/libtomcrypt"
+LTC="$SOURCES/libtomcrypt"
 
-trust_keys "$WORK"
-fetch_sqlcipher "$WORK"
+if [ -n "${SQLCIPHER_TREE:-}" ]; then
+    cp -R "$SQLCIPHER_TREE" "$WORK/sqlcipher"
+else
+    trust_keys "$WORK"
+    fetch_sqlcipher "$WORK"
+fi
 cd "$WORK/sqlcipher"
 # TCL_LIB names the tclConfig.sh directory when configure cannot find it.
 CC="$CC" ./configure ${TCL_LIB:+--with-tcl="$TCL_LIB"} > configure.log
@@ -45,16 +56,16 @@ printf '#define SQLITE_TEMP_STORE 2\n#include "%s"\n' "$SHIM/sqlcipher-wasm.c" >
 mkdir ltc
 # shellcheck disable=SC2016 # The inner sh expands them.
 sed -n 's/^ *"\(libtomcrypt\/.*\.c\)",$/\1/p' "$ROOT/src/libtomcrypt_sources.rs" |
-    OPT="$OPT" CC="$CC" SHIM="$SHIM" LTC="$LTC" ROOT="$ROOT" xargs -P "$(nproc)" -I {} sh -c \
-        'o="ltc/$(echo "$1" | tr / _).o"; $CC $OPT -include "$SHIM/sqlcipher-ltc.h" -DLTC_SOURCE -I"$LTC/headers" -c "$ROOT/sqlcipher/$1" -o "$o"' _ {}
+    OPT="$OPT" CC="$CC" SHIM="$SHIM" LTC="$LTC" SOURCES="$SOURCES" LEGFLAGS="$LEGFLAGS" xargs -P "$(nproc)" -I {} sh -c \
+        'o="ltc/$(echo "$1" | tr / _).o"; $CC $OPT $LEGFLAGS -include "$SHIM/sqlcipher-ltc.h" -DLTC_SOURCE -I"$LTC/headers" -c "$SOURCES/$1" -o "$o"' _ {}
 [ "$(find ltc -name '*.o' | wc -l)" -eq "$(grep -c '"libtomcrypt/' "$ROOT/src/libtomcrypt_sources.rs")" ] ||
     { echo "not every libtomcrypt source compiled" >&2; exit 1; }
-# shellcheck disable=SC2086 # OPT holds several flags.
-$CC $OPT -I"$LTC/headers" -c "$SHIM/sqlcipher-entropy.c" -o ltc/entropy.o
+# shellcheck disable=SC2086 # OPT and a leg's switches hold several flags.
+$CC $OPT $LEGFLAGS -I"$LTC/headers" -c "$SHIM/sqlcipher-entropy.c" -o ltc/entropy.o
 # SQLITE_HAS_CODEC stops every file skipping itself, SQLCIPHER_TEST enables the error pragmas, FTS5 is used by export tests.
 # main.mk links with CFLAGS and never reads LDFLAGS, so the sanitizer flags in OPT reach the link from here.
 # LDFLAGS.configure is the one variable main.mk appends to the testfixture link.
-make testfixture CC="$CC" CFLAGS="$OPT -I$ROOT/sqlcipher -I$LTC/headers -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
+make testfixture CC="$CC" CFLAGS="$OPT $LEGFLAGS -I$SOURCES -I$LTC/headers -DSQLITE_HAS_CODEC=1 -DSQLCIPHER_TEST=1 -DSQLITE_ENABLE_FTS5=1" \
     LDFLAGS.configure="$(echo "$PWD"/ltc/*.o)" > testfixture.log 2>&1
 
 for symbol in sqlcipher_wasm_extra_init fortuna_start; do
@@ -64,7 +75,8 @@ done
 # A clean sanitizer run only counts if the binary is really instrumented.
 [ -z "${SANITIZE:-}" ] || { nm testfixture | grep -q __asan_report_load && nm testfixture | grep -q __ubsan_handle; } ||
     { echo "testfixture is not instrumented" >&2; exit 1; }
-printf 'sqlite3 db :memory:\ndb eval {PRAGMA key = %s}\nputs "[db eval {PRAGMA cipher_version}] [db eval {PRAGMA cipher_provider}]"\n' "'probe'" > probe.tcl
+# 5.x refuses a key on :memory:, so the probe keys a file.
+printf 'sqlite3 db probe.db\ndb eval {PRAGMA key = %s}\nputs "[db eval {PRAGMA cipher_version}] [db eval {PRAGMA cipher_provider}]"\n' "'probe'" > probe.tcl
 echo "Testing SQLCipher $(./testfixture probe.tcl)"
 
 failed_files=""

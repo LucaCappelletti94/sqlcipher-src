@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: shellcheck -x upgrade.sh bump.sh interop/run.sh suite/run.sh tools/releases.sh
+      - run: shellcheck -x upgrade.sh bump.sh interop/run.sh suite/run.sh tools/releases.sh tools/leg.sh tools/rusqlite-native.sh
       - name: actionlint
         run: |
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12
@@ -170,22 +170,16 @@ jobs:
   rusqlite-native:
     name: rusqlite's SQLCipher tests pass on these sources natively
     runs-on: ubuntu-latest
-    env:
-      # Moved by hand, since Dependabot cannot follow a git revision.
-      RUSQLITE_REV: b6476751216cb8569a3f747611f37a394a8de4e3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: stable
-      - name: Build libsqlite3-sys from this amalgamation and run rusqlite's SQLCipher tests
-        run: |
-          set -euo pipefail
-          rusqlite="$RUNNER_TEMP/rusqlite"
-          git init -q "$rusqlite"
-          git -C "$rusqlite" fetch -q --depth 1 https://github.com/rusqlite/rusqlite.git "$RUSQLITE_REV"
-          git -C "$rusqlite" checkout -q FETCH_HEAD
-          cp sqlcipher/sqlcipher.c "$rusqlite/libsqlite3-sys/sqlcipher/sqlite3.c"
-          cp sqlcipher/sqlite3.h sqlcipher/sqlite3ext.h "$rusqlite/libsqlite3-sys/sqlcipher/"
-          cd "$rusqlite"
-          cargo test --features "backup blob chrono functions limits load_extension serde_json trace vtab bundled-sqlcipher-vendored-openssl"
+      - run: ./tools/rusqlite-native.sh
+
+  # The signed pre-release pinned in tools/releases.sh, which nothing ships.
+  next:
+    name: SQLCipher next
+    uses: ./.github/workflows/sqlcipher-leg.yml
+    with:
+      leg: next
