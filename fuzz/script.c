@@ -10,6 +10,7 @@
 #include "memvfs.h"
 #include "script.h"
 #include "tamper.h"
+#include "uniqueness.h"
 
 #define MAX_OPS 64
 #define MAX_RECIPE 16
@@ -169,7 +170,10 @@ static sqlite3 *open_file(int file, int create) {
 }
 
 static void close_db(void) {
-  if (db) lib->close_v2(db);
+  if (db) {
+    uniqueness_check(lib, db, "main", db_file, files[db_file]);
+    lib->close_v2(db);
+  }
   db = NULL;
   db_file = -1;
   touched = 0;
@@ -280,6 +284,9 @@ static int run_trusted(sqlite3 *handle, const char *sql, struct dump *out) {
   return rc;
 }
 
+/* read_key's length for its raw key with an explicit salt, x'<64 hex digits key><32 hex digits salt>'. */
+#define RAW_KEY_SALT_LEN (3 + 2 * 48)
+
 static void read_key(struct input *in, struct key *key) {
   unsigned form = u8(in);
   memset(key, 0, sizeof *key);
@@ -358,7 +365,7 @@ static const enum setting settings_5[] = {
 };
 
 /* One codec pragma on schema, followed by a cheap kdf_iter wherever the pragma would restore an expensive one. */
-static void format_setting(struct input *in, const char *schema, char *sql, size_t cap) {
+static enum setting format_setting(struct input *in, const char *schema, char *sql, size_t cap) {
   static const char *const on_off[] = {"ON", "OFF"};
   static const char *const hmacs[] = {"HMAC_SHA1", "HMAC_SHA256", "HMAC_SHA512", "HMAC_MD5"};
   static const char *const kdfs[] = {"PBKDF2_HMAC_SHA1", "PBKDF2_HMAC_SHA256", "PBKDF2_HMAC_SHA512", "SCRYPT"};
@@ -432,12 +439,19 @@ static void format_setting(struct input *in, const char *schema, char *sql, size
     break;
   }
   }
+  return setting;
 }
 
-static void apply_setting(sqlite3 *handle, const char *schema, struct input *in, struct dump *out) {
+static enum setting apply_setting(sqlite3 *handle, const char *schema, struct input *in, struct dump *out) {
   char sql[160];
-  format_setting(in, schema, sql, sizeof sql);
+  enum setting setting = format_setting(in, schema, sql, sizeof sql);
   run_trusted(handle, sql, out);
+  return setting;
+}
+
+/* A key that carries its own salt sets that salt on purpose, so file's salt is no longer a draw. */
+static void note_salted_key(int file, const struct key *key, int rc) {
+  if (rc == SQLITE_OK && key->len == RAW_KEY_SALT_LEN) uniqueness_note_explicit_salt(file);
 }
 
 static void record(int file, enum step_kind kind, const uint8_t *start, const uint8_t *end) {
@@ -591,15 +605,17 @@ static void op_key(struct input *in, int rekey) {
   } else if (rc == SQLITE_OK) {
     confidentiality_forget_file(db_file); /* A rekey to the empty key writes the file back in plaintext. */
   }
+  note_salted_key(db_file, &key, rc);
   record(db_file, STEP_KEY, start, in->data);
 }
 
 static void op_setting(struct input *in) {
   const uint8_t *start = in->data;
   char sql[160];
-  format_setting(in, "main", sql, sizeof sql);
+  enum setting setting = format_setting(in, "main", sql, sizeof sql);
   if (!db || touched) return; /* L6 */
   run_trusted(db, sql, NULL);
+  if (setting == SET_SALT) uniqueness_note_explicit_salt(db_file);
   record(db_file, STEP_SETTING, start, in->data);
   if (header_mismatch(db, db_file)) close_db(); /* L8 */
 }
@@ -633,15 +649,17 @@ static void op_attach(struct input *in) {
   trusted = 0;
   if (rc != SQLITE_OK) return;
   verify_key(db, "aux", file, key.len);
+  note_salted_key(file, &key, SQLITE_OK);
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
   for (unsigned i = 0; i < settings; i++) {
     const uint8_t *setting = in->data;
-    apply_setting(db, "aux", in, NULL);
+    if (apply_setting(db, "aux", in, NULL) == SET_SALT) uniqueness_note_explicit_salt(file);
     record(file, STEP_SETTING, setting, in->data);
   }
   run_trusted(db, PICK(in, moves), NULL);
+  uniqueness_check(lib, db, "aux", file, files[file]);
   run_trusted(db, "DETACH aux", NULL);
 }
 
@@ -658,9 +676,12 @@ static void op_backup(struct input *in) {
   confidentiality_forget_file(file);
   recipes[file].count = 0;
   recipes[file].passphrase = key.passphrase;
-  if (apply_key(dest, "main", &key, 0, NULL) == SQLITE_OK) verify_key(dest, "main", file, key.len);
+  int rc = apply_key(dest, "main", &key, 0, NULL);
+  if (rc == SQLITE_OK) verify_key(dest, "main", file, key.len);
+  note_salted_key(file, &key, rc);
   record(file, STEP_KEY, start, in->data);
   if (known_backup_blocked(major, fuzz_codec_page_size(lib, db), fuzz_codec_page_size(lib, dest))) {
+    uniqueness_check(lib, dest, "main", file, files[file]);
     lib->close_v2(dest);
     return;
   }
@@ -669,6 +690,7 @@ static void op_backup(struct input *in) {
     lib->backup_step(backup, -1);
     lib->backup_finish(backup);
   }
+  uniqueness_check(lib, dest, "main", file, files[file]);
   lib->close_v2(dest);
 }
 
@@ -697,6 +719,8 @@ static void op_damage(struct input *in) {
   if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, len)) return;
   int file = file_of_memvfs(index);
   tamper_prune(file, memvfs_name(index));
+  /* Raw damage writes input bytes, which mutators copy around, so an IV or salt there is no draw. */
+  if (kind != 1) uniqueness_note_damage(file);
   if (kind == 0) {
     if (size) {
       memvfs_flip(index, at, (unsigned char)mask);
@@ -740,6 +764,7 @@ static void op_cache_race(struct input *in) {
   tamper_prune(db_file, memvfs_name(index));
   memvfs_flip(index, at, mask);
   tamper_flip(db_file, memvfs_name(index), at, mask);
+  uniqueness_note_damage(db_file);
   if (kind == 0) {
     const uint8_t *start = in->data;
     struct key key;
@@ -747,6 +772,7 @@ static void op_cache_race(struct input *in) {
     int rc = apply_key(db, "main", &key, 1, NULL);
     if (rc == SQLITE_OK && key.len > 0) confidentiality_mark_keyed(db_file);
     else if (rc == SQLITE_OK) confidentiality_forget_file(db_file);
+    note_salted_key(db_file, &key, rc);
     record(db_file, STEP_KEY, start, in->data);
     if (key.passphrase) recipes[db_file].passphrase = 1;
   } else if (kind == 1) {
