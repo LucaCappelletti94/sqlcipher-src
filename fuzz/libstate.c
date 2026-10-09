@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "confidentiality.h"
 #include "libstate.h"
 #include "memvfs.h"
 #include "random.h"
@@ -92,6 +93,7 @@ int fuzz_codec_page_size(const struct fuzz_sqlite *api, sqlite3 *handle) {
 void fuzz_reset_all(void) {
   memvfs_reset();
   tamper_reset_all();
+  confidentiality_reset();
   fuzz_random_reset();
 }
 

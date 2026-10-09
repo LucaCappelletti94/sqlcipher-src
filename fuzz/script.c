@@ -4,6 +4,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "confidentiality.h"
 #include "known.h"
 #include "libstate.h"
 #include "memvfs.h"
@@ -40,7 +41,8 @@ enum op {
   OP_READ = 11,
   OP_CACHE_RACE = 12,
   OP_RAW_SQL = 13,
-  OP_COUNT = 14,
+  OP_CANARY = 14,
+  OP_COUNT = 15,
 };
 
 enum step_kind { STEP_KEY, STEP_SETTING };
@@ -224,12 +226,13 @@ static int has_pending_recovery(int file) {
   return len != 0;
 }
 
-/* Reads through the key just applied on schema, and checks a mismatch left file's bytes untouched. */
-static void verify_key(sqlite3 *handle, const char *schema, int file) {
+/* Reads through the key just applied on schema, checks a mismatch left file's bytes untouched, and marks a match. */
+static void verify_key(sqlite3 *handle, const char *schema, int file, int key_len) {
   unsigned long long before = tamper_hash_file(files[file]);
   int recovery = has_pending_recovery(file);
   int rc = key_verified(handle, schema);
   if (!recovery) tamper_check_wrong_key(rc, before, files[file]);
+  if (key_len > 0 && (rc == SQLITE_ROW || rc == SQLITE_DONE)) confidentiality_mark_keyed(file);
 }
 
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
@@ -579,9 +582,14 @@ static void op_key(struct input *in, int rekey) {
     run_trusted(db, "PRAGMA main.cipher_migrate", NULL);
     touched = 1;
   }
+  /* key_v2 never encrypts what the file already holds, so only a read that decodes proves the key, unlike rekey_v2. */
   if (!rekey && rc == SQLITE_OK) {
-    verify_key(db, "main", db_file);
+    verify_key(db, "main", db_file, key.len);
     touched = 1;
+  } else if (rc == SQLITE_OK && key.len > 0) {
+    confidentiality_mark_keyed(db_file);
+  } else if (rc == SQLITE_OK) {
+    confidentiality_forget_file(db_file); /* A rekey to the empty key writes the file back in plaintext. */
   }
   record(db_file, STEP_KEY, start, in->data);
 }
@@ -611,6 +619,7 @@ static void op_attach(struct input *in) {
   if (!db) return;
   touched = 1;
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
+  confidentiality_forget_file(file);
   if (known_header_page_mismatch(major, memvfs_header_page_size(files[file]), default_page)) return; /* L8 */
   recipes[file].count = 0;
   recipes[file].passphrase = key.passphrase;
@@ -623,7 +632,7 @@ static void op_attach(struct input *in) {
   int rc = drain(stmt, NULL);
   trusted = 0;
   if (rc != SQLITE_OK) return;
-  verify_key(db, "aux", file);
+  verify_key(db, "aux", file, key.len);
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
@@ -646,9 +655,10 @@ static void op_backup(struct input *in) {
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
   sqlite3 *dest = open_file(file, 1);
   if (!dest) return;
+  confidentiality_forget_file(file);
   recipes[file].count = 0;
   recipes[file].passphrase = key.passphrase;
-  if (apply_key(dest, "main", &key, 0, NULL) == SQLITE_OK) verify_key(dest, "main", file);
+  if (apply_key(dest, "main", &key, 0, NULL) == SQLITE_OK) verify_key(dest, "main", file, key.len);
   record(file, STEP_KEY, start, in->data);
   if (known_backup_blocked(major, fuzz_codec_page_size(lib, db), fuzz_codec_page_size(lib, dest))) {
     lib->close_v2(dest);
@@ -734,7 +744,9 @@ static void op_cache_race(struct input *in) {
     const uint8_t *start = in->data;
     struct key key;
     read_key(in, &key);
-    apply_key(db, "main", &key, 1, NULL);
+    int rc = apply_key(db, "main", &key, 1, NULL);
+    if (rc == SQLITE_OK && key.len > 0) confidentiality_mark_keyed(db_file);
+    else if (rc == SQLITE_OK) confidentiality_forget_file(db_file);
     record(db_file, STEP_KEY, start, in->data);
     if (key.passphrase) recipes[db_file].passphrase = 1;
   } else if (kind == 1) {
@@ -783,6 +795,7 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       db = open_file(file, 1);
       if (db) db_file = file;
       memset(&recipes[file], 0, sizeof recipes[file]);
+      confidentiality_forget_file(file);
       break;
     }
     case OP_REOPEN: {
@@ -834,11 +847,17 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
     case OP_RAW_SQL:
       op_raw_sql(in);
       break;
+    case OP_CANARY:
+      if (!db) break;
+      touched = 1;
+      confidentiality_plant(lib, db);
+      break;
     case OP_COUNT:
       abort();
     }
   }
   close_db();
+  confidentiality_check(files, SCRIPT_FILES);
 }
 
 void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
