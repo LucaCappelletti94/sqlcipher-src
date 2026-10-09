@@ -69,7 +69,7 @@ fn c_len(key: &[u8]) -> i32 {
 }
 
 #[wasm_bindgen_test]
-fn bindings_key_and_rekey_the_shipped_sources() {
+fn bindings_key_and_rekey_the_sources() {
     assert_eq!(unsafe { ffi::sqlite3_initialize() }, ffi::SQLITE_OK);
     let util = unsafe { MemVfsUtil::get() }.unwrap();
     {
