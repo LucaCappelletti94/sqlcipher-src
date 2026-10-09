@@ -1,5 +1,5 @@
 # shellcheck shell=sh
-# Pinned upstream releases and their verified fetch, sourced by upgrade.sh and suite/run.sh with ROOT set.
+# Pinned upstream releases and their verified fetch, sourced by upgrade.sh, suite/run.sh and fuzz/sources.sh with ROOT set.
 
 SQLCIPHER_VERSION="4.19.0"
 # A signed tag moved to another commit still fails.
@@ -50,5 +50,16 @@ fetch_libtomcrypt() {
     echo "$LIBTOMCRYPT_SHA256  $1/libtomcrypt.tar.xz" | shasum -a 256 -c -
     mkdir "$1/libtomcrypt"
     tar xJf "$1/libtomcrypt.tar.xz" --strip-components=1 -C "$1/libtomcrypt"
+}
+
+# Prints the directory of sqlite-wasm-rs's SQLCipher wrapper at the revision interop/web pins, as cargo resolves it.
+wasm_shim() {
+    shim=$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT/interop/web/Cargo.toml" |
+        jq -r '.packages[] | select(.name == "sqlite-wasm-rs" and (.source | startswith("git+"))) | .manifest_path' |
+        xargs dirname)/shim
+    for unit in sqlcipher-wasm.c sqlcipher-entropy.c sqlcipher-ltc.h; do
+        [ -f "$shim/$unit" ] || { echo "no sqlite-wasm-rs $unit in $shim" >&2; exit 1; }
+    done
+    echo "$shim"
 }
 
