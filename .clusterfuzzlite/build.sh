@@ -84,12 +84,14 @@ target() {
     $CC $CFLAGS -Wall -Wextra -Werror "$@" -c "$source.c" -o "$WORK/$binary.o"
 }
 
-for source in app known libstate memvfs pagemut plaindiff random rawfile script; do
+for source in app known libstate memvfs pagemut plaindiff random rawfile script tamper; do
     # shellcheck disable=SC2086
     $CC $CFLAGS -Wall -Wextra -Werror -c "$source.c" -o "$WORK/$source.o"
 done
-script_units=("$WORK/script.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o")
-file_units=("$WORK/app.o" "$WORK/rawfile.o" "$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o")
+# Every target links libstate, whose per-input reset clears each oracle's record.
+state_units=("$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o" "$WORK/tamper.o")
+script_units=("$WORK/script.o" "${state_units[@]}")
+file_units=("$WORK/app.o" "$WORK/rawfile.o" "${state_units[@]}")
 
 # The system heap lets AddressSanitizer see overflows that SQLCipher's private heap arena hides.
 spawn release libtomcrypt libtomcrypt.c "$WORK/libtomcrypt.o" "${WRAPPER[@]}"

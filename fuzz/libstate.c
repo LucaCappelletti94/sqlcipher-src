@@ -6,6 +6,7 @@
 #include "memvfs.h"
 #include "random.h"
 #include "script.h"
+#include "tamper.h"
 
 static struct {
   const struct fuzz_sqlite *api;
@@ -90,7 +91,17 @@ int fuzz_codec_page_size(const struct fuzz_sqlite *api, sqlite3 *handle) {
 
 void fuzz_reset_all(void) {
   memvfs_reset();
+  tamper_reset_all();
   fuzz_random_reset();
+}
+
+unsigned long long fuzz_fnv1a(const unsigned char *bytes, size_t len) {
+  unsigned long long hash = 1469598103934665603ULL;
+  for (size_t i = 0; i < len; i++) {
+    hash ^= bytes[i];
+    hash *= 1099511628211ULL;
+  }
+  return hash;
 }
 
 void fuzz_grow_append(unsigned char **bytes, size_t *len, size_t *cap, size_t max, const void *data,
