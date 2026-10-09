@@ -11,6 +11,7 @@ struct fuzz_sqlite {
   const char *name;
   int (*open_v2)(const char *, sqlite3 **, int, const char *);
   int (*close_v2)(sqlite3 *);
+  int (*get_autocommit)(sqlite3 *);
   int (*prepare_v2)(sqlite3 *, const char *, int, sqlite3_stmt **, const char **);
   int (*step)(sqlite3_stmt *);
   int (*finalize)(sqlite3_stmt *);

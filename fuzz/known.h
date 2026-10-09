@@ -27,4 +27,7 @@ int known_header_page_mismatch(int major, int header_page, int codec_page);
 /* L6: a codec setting applied after the connection touched its file. */
 int known_late_setting(const char *name);
 
+/* L11: cipher_migrate after the connection touched its file fails yet leaves every later read SQLITE_NOTADB. */
+int known_migrate_poisons(int already_touched);
+
 #endif
