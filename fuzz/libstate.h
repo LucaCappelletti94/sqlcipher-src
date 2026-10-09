@@ -5,6 +5,7 @@
 
 #include "api.h"
 
+/* Forward-declared, since plaindiff.c has its own struct dump. */
 struct dump;
 
 /* Puts a library's process-wide settings back to the same state before every input, and caches its major version. */
