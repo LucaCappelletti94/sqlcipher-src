@@ -30,4 +30,7 @@ int known_late_setting(const char *name);
 /* L11: cipher_migrate after the connection touched its file fails yet leaves every later read SQLITE_NOTADB. */
 int known_migrate_poisons(int already_touched);
 
+/* L13: a rekey inside an open transaction commits it, so the application's later ROLLBACK restores nothing. */
+int known_rekey_commits_transaction(int autocommit);
+
 #endif

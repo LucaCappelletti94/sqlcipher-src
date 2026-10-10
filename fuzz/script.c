@@ -55,6 +55,8 @@ enum step_kind { STEP_KEY, STEP_SETTING };
 struct step {
   enum step_kind kind;
   struct input slice;
+  /* Nonzero for a rekey, which keeps the connection's kdf_iter while the key it replays as sets its own. */
+  int kdf_iter;
 };
 
 struct recipe {
@@ -85,6 +87,8 @@ static int default_page;
 static int trusted;
 static long budget;
 static struct recipe recipes[SCRIPT_FILES];
+/* Files whose content plain SQLite cannot reproduce, which differential_plain leaves uncompared. */
+static int plain_exempt[SCRIPT_FILES];
 
 static unsigned u8(struct input *in) {
   if (!in->size) return 0;
@@ -240,6 +244,8 @@ static void verify_key(sqlite3 *handle, const char *schema, int file, int key_le
   int rc = key_verified(handle, schema);
   if (!recovery) tamper_check_wrong_key(rc, before, files[file]);
   if (key_len > 0 && (rc == SQLITE_ROW || rc == SQLITE_DONE)) confidentiality_mark_keyed(file);
+  /* The codec connection cannot read or write a file its key does not open, while plain SQLite can. */
+  if (rc != SQLITE_ROW && rc != SQLITE_DONE) plain_exempt[file] = 1;
 }
 
 /* L1: VACUUM INTO, and VACUUM with a file temp store, copy pages into a database keyed with the default page size. */
@@ -252,6 +258,23 @@ static int vacuum_blocked(sqlite3 *handle, int vacuum) {
 static int header_mismatch(sqlite3 *handle, int file) {
   int header_page = file < 0 ? 0 : memvfs_header_page_size(files[file]);
   return header_page && known_header_page_mismatch(major, header_page, fuzz_codec_page_size(lib, handle));
+}
+
+/* The plain run never sees an L8 mismatch, so it keeps a connection open that the codec run closes. */
+static int plain_diverged;
+
+static void close_mismatched(void) {
+  close_db();
+  plain_diverged = 1;
+}
+
+/* Whether file holds pages, in the database or its WAL, that an earlier key and settings wrote. */
+static int file_written(int file) {
+  char wal[32];
+  size_t len = 0;
+  if (memvfs_peek(files[file], &len) && len) return 1;
+  snprintf(wal, sizeof wal, "%s-wal", files[file]);
+  return memvfs_peek(wal, &len) && len;
 }
 
 /* Runs every statement in sql and returns the first failure. */
@@ -315,6 +338,7 @@ static void read_key(struct input *in, struct key *key) {
 static int apply_key(sqlite3 *handle, const char *schema, const struct key *key, int rekey, struct dump *out) {
   char sql[96];
   if (rekey) {
+    if (!lib->rekey_v2) return SQLITE_OK; /* Plain SQLite has no codec to rekey. */
     if (major < 5) {
       snprintf(sql, sizeof sql, "PRAGMA \"%s\".rekey_kdf_iter = %d", schema, key->kdf_iter);
       run_trusted(handle, sql, out);
@@ -323,6 +347,7 @@ static int apply_key(sqlite3 *handle, const char *schema, const struct key *key,
     dump_code(out, rc);
     return rc;
   }
+  if (!lib->key_v2) return SQLITE_OK;
   int rc = lib->key_v2(handle, schema, key->bytes, key->len);
   dump_code(out, rc);
   snprintf(sql, sizeof sql, "PRAGMA \"%s\".kdf_iter = %d", schema, key->kdf_iter);
@@ -463,7 +488,32 @@ static void record(int file, enum step_kind kind, const uint8_t *start, const ui
   recipe->steps[recipe->count].kind = kind;
   recipe->steps[recipe->count].slice.data = start;
   recipe->steps[recipe->count].slice.size = (size_t)(end - start);
+  recipe->steps[recipe->count].kdf_iter = 0;
   recipe->count++;
+}
+
+/* A failed rekey leaves the old key in place, while replaying it as a key would apply the new one. */
+static void record_rekey(int file, const uint8_t *start, const uint8_t *end, int rc) {
+  if (rc != SQLITE_OK) return;
+  trusted = 1;
+  int kdf_iter = lib_int(lib, db, "PRAGMA main.kdf_iter");
+  trusted = 0;
+  record(file, STEP_KEY, start, end);
+  struct recipe *recipe = &recipes[file];
+  if (recipe->count > 0) recipe->steps[recipe->count - 1].kdf_iter = kdf_iter;
+}
+
+/* Whether the last key file's recipe applies is a nonempty one. */
+static int recipe_keyed(int file) {
+  int keyed = 0;
+  for (int i = 0; i < recipes[file].count; i++) {
+    if (recipes[file].steps[i].kind != STEP_KEY) continue;
+    struct input slice = recipes[file].steps[i].slice;
+    struct key key;
+    read_key(&slice, &key);
+    keyed = key.len > 0;
+  }
+  return keyed;
 }
 
 /* Returns nonzero when the replayed settings disagree with the file's plaintext header (L8). */
@@ -474,6 +524,7 @@ static int replay(sqlite3 *handle, int file, struct dump *out) {
     if (recipe->steps[i].kind == STEP_KEY) {
       struct key key;
       read_key(&slice, &key);
+      if (recipe->steps[i].kdf_iter) key.kdf_iter = recipe->steps[i].kdf_iter;
       apply_key(handle, "main", &key, 0, out);
     } else {
       apply_setting(handle, "main", &slice, out);
@@ -482,12 +533,17 @@ static int replay(sqlite3 *handle, int file, struct dump *out) {
   return header_mismatch(handle, file);
 }
 
-static void read_all(sqlite3 *handle, struct dump *out) {
+/* Every table's rows, plus the result codes only a codec connection has when codes is set. */
+static void read_tables(sqlite3 *handle, struct dump *out, int codes) {
   char names[MAX_DUMP_TABLES][128];
   int count = 0;
   sqlite3_stmt *stmt = NULL;
-  int rc = lib->prepare_v2(handle, "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name", -1, &stmt,
-                           NULL);
+  /* Canary names carry a counter that differs between the two runs of differential_plain, so it skips them. */
+  int rc = lib->prepare_v2(handle,
+                           codes ? "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name"
+                                 : "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE "
+                                   "'canary\\_%' ESCAPE '\\' ORDER BY name",
+                           -1, &stmt, NULL);
   if (rc == SQLITE_OK) {
     while ((rc = lib->step(stmt)) == SQLITE_ROW) {
       dump_row(stmt, out);
@@ -500,7 +556,9 @@ static void read_all(sqlite3 *handle, struct dump *out) {
     }
     lib->finalize(stmt);
   }
-  dump_code(out, rc);
+  if (codes) dump_code(out, rc);
+  /* A database without tables holds what a missing file holds, and harness pragmas create files on one side only. */
+  if (!codes && count == 0) return;
   for (int i = 0; i < count; i++) {
     char sql[300] = "SELECT * FROM \"";
     size_t at = strlen(sql);
@@ -512,19 +570,33 @@ static void read_all(sqlite3 *handle, struct dump *out) {
     sql[at] = 0;
     run(handle, sql, out);
   }
-  run_trusted(handle, "PRAGMA cipher_integrity_check; PRAGMA integrity_check", out);
+  run_trusted(handle, codes ? "PRAGMA cipher_integrity_check; PRAGMA integrity_check" : "PRAGMA integrity_check", out);
+}
+
+static void read_all(sqlite3 *handle, struct dump *out) { read_tables(handle, out, 1); }
+
+/* SQLite's PRNG also feeds journal and temp-file draws, which differ between a codec and a plain connection. */
+static uint64_t blob_state;
+
+static void fill_blob(unsigned char *out, unsigned len) {
+  for (unsigned i = 0; i < len; i++) {
+    uint64_t z = (blob_state += 0x9e3779b97f4a7c15ULL);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    out[i] = (unsigned char)(z ^ (z >> 31));
+  }
 }
 
 static void op_statement(struct input *in) {
   static const char *const statements[] = {
       "CREATE TABLE IF NOT EXISTS t(a INTEGER PRIMARY KEY, b BLOB, c TEXT)",
-      "INSERT INTO t(b, c) VALUES (randomblob(?1), ?3)",
+      "INSERT INTO t(b, c) VALUES (?4, ?3)",
       "INSERT INTO t(b, c) SELECT zeroblob(?2), c FROM t LIMIT 16",
-      "UPDATE t SET b = randomblob(?1) WHERE a % 3 = ?2 % 3",
+      "UPDATE t SET b = ?4 WHERE a % 3 = ?2 % 3",
       "DELETE FROM t WHERE a % (?2 % 4 + 1) = 0",
       "CREATE INDEX IF NOT EXISTS t_c ON t(c)",
       "CREATE TABLE IF NOT EXISTS w(k TEXT PRIMARY KEY, v BLOB) WITHOUT ROWID",
-      "INSERT OR REPLACE INTO w VALUES (hex(randomblob(?2 % 32 + 1)), randomblob(?1))",
+      "INSERT OR REPLACE INTO w VALUES (hex(substr(?5, 1, ?2 % 32 + 1)), ?4)",
       "DROP TABLE IF EXISTS w",
       "VACUUM",
       "BEGIN",
@@ -545,6 +617,10 @@ static void op_statement(struct input *in) {
   unsigned blob = u16(in) % (MAX_BLOB + 1);
   unsigned small = u8(in);
   struct input text = take(in, 256);
+  /* Drawn before any return, so the codec and plain runs see the same values for the same op. */
+  static unsigned char bytes[MAX_BLOB], key_bytes[32];
+  fill_blob(bytes, blob);
+  fill_blob(key_bytes, sizeof key_bytes);
   if (!db) return;
   int already_touched = touched;
   touched = 1;
@@ -557,7 +633,11 @@ static void op_statement(struct input *in) {
   lib->bind_int64(stmt, 1, blob);
   lib->bind_int64(stmt, 2, small);
   lib->bind_text(stmt, 3, (const char *)text.data, (int)text.size, SQLITE_TRANSIENT);
+  lib->bind_blob(stmt, 4, bytes, (int)blob, SQLITE_STATIC);
+  lib->bind_blob(stmt, 5, key_bytes, sizeof key_bytes, SQLITE_STATIC);
   int check = migrate && !known_migrate_poisons(already_touched);
+  /* L11: after a late cipher_migrate every read on the codec connection fails, while plain SQLite has no such pragma. */
+  if (migrate && known_migrate_poisons(already_touched)) plain_exempt[db_file] = 1;
   if (check) model_snapshot(lib, db, "main", db_file);
   trusted = 1;
   int rc = drain(stmt, NULL);
@@ -589,8 +669,10 @@ static void op_pragma(struct input *in) {
   /* L6: SQLCipher answers page_size as cipher_page_size, which after first access is the same misuse as a late key. */
   if (!db || (index == 7 && touched)) return;
   touched = 1;
+  /* page_size is cipher_page_size here, so it pins a written file as op_setting's settings do. */
+  if (index == 7 && file_written(db_file)) plain_exempt[db_file] = 1;
   run_trusted(db, sql, NULL);
-  if (header_mismatch(db, db_file)) close_db(); /* L8 */
+  if (header_mismatch(db, db_file)) close_mismatched(); /* L8 */
 }
 
 static void op_key(struct input *in, int rekey) {
@@ -598,8 +680,9 @@ static void op_key(struct input *in, int rekey) {
   struct key key;
   read_key(in, &key);
   /* L6: a key applied after the connection touched the file is position D and corrupts memory. */
-  if (!db || (touched && !rekey)) return;
+  if (!db || (touched && !rekey) || !lib->key_v2) return;
   if (rekey) model_snapshot(lib, db, "main", db_file);
+  if (rekey && known_rekey_commits_transaction(lib->get_autocommit(db))) plain_exempt[db_file] = 1;
   int rc = apply_key(db, "main", &key, rekey, NULL);
   if (rekey && rc == SQLITE_OK) model_check(lib, db, "main", db_file, files[db_file], "rekey");
   else if (rekey) model_discard();
@@ -622,7 +705,8 @@ static void op_key(struct input *in, int rekey) {
     confidentiality_forget_file(db_file); /* A rekey to the empty key writes the file back in plaintext. */
   }
   note_salted_key(db_file, &key, rc);
-  record(db_file, STEP_KEY, start, in->data);
+  if (rekey) record_rekey(db_file, start, in->data, rc);
+  else record(db_file, STEP_KEY, start, in->data);
 }
 
 static void op_setting(struct input *in) {
@@ -630,10 +714,12 @@ static void op_setting(struct input *in) {
   char sql[160];
   enum setting setting = format_setting(in, "main", sql, sizeof sql);
   if (!db || touched) return; /* L6 */
+  /* The codec reads a written file only under the settings that wrote it, while plain SQLite ignores them. */
+  if (file_written(db_file)) plain_exempt[db_file] = 1;
   run_trusted(db, sql, NULL);
   if (setting == SET_SALT) uniqueness_note_explicit_salt(db_file);
   record(db_file, STEP_SETTING, start, in->data);
-  if (header_mismatch(db, db_file)) close_db(); /* L8 */
+  if (header_mismatch(db, db_file)) close_mismatched(); /* L8 */
 }
 
 static void op_attach(struct input *in) {
@@ -648,37 +734,59 @@ static void op_attach(struct input *in) {
   read_key(in, &key);
   const uint8_t *key_end = in->data;
   unsigned settings = u8(in) % 3;
+  /* Parsed before any return, since the codec and plain runs return at different points and must stay aligned. */
+  char setting_sql[2][160];
+  enum setting setting_kind[2];
+  struct input setting_slice[2];
+  for (unsigned i = 0; i < settings; i++) {
+    setting_slice[i].data = in->data;
+    setting_kind[i] = format_setting(in, "aux", setting_sql[i], sizeof setting_sql[i]);
+    setting_slice[i].size = (size_t)(in->data - setting_slice[i].data);
+  }
+  unsigned move = u8(in) % (sizeof moves / sizeof *moves);
   if (!db) return;
   touched = 1;
   int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
   confidentiality_forget_file(file);
   if (known_header_page_mismatch(major, memvfs_header_page_size(files[file]), default_page)) return; /* L8 */
-  recipes[file].count = 0;
-  recipes[file].passphrase = key.passphrase;
-  record(file, STEP_KEY, start, key_end);
+  int written = file_written(file);
   sqlite3_stmt *stmt = NULL;
-  if (lib->prepare_v2(db, "ATTACH ?1 AS aux KEY ?2", -1, &stmt, NULL) != SQLITE_OK) return;
+  /* Plain SQLite has no KEY clause, so it attaches the same file without one. */
+  int keyless = !lib->key_v2;
+  if (lib->prepare_v2(db, keyless ? "ATTACH ?1 AS aux" : "ATTACH ?1 AS aux KEY ?2", -1, &stmt, NULL) != SQLITE_OK)
+    return;
   lib->bind_text(stmt, 1, files[file], -1, SQLITE_STATIC);
-  lib->bind_blob(stmt, 2, key.bytes, key.len, SQLITE_TRANSIENT);
+  if (!keyless) lib->bind_blob(stmt, 2, key.bytes, key.len, SQLITE_TRANSIENT);
   trusted = 1;
   int rc = drain(stmt, NULL);
   trusted = 0;
-  if (rc != SQLITE_OK) return;
-  verify_key(db, "aux", file, key.len);
-  note_salted_key(file, &key, SQLITE_OK);
+  if (rc != SQLITE_OK) {
+    if (!keyless) plain_exempt[file] = 1; /* Plain SQLite attaches what the codec refused to. */
+    return;
+  }
+  recipes[file].count = 0;
+  recipes[file].passphrase = key.passphrase;
+  record(file, STEP_KEY, start, key_end);
+  if (!keyless) {
+    verify_key(db, "aux", file, key.len);
+    note_salted_key(file, &key, SQLITE_OK);
+  }
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA aux.kdf_iter = %d", key.kdf_iter);
   run_trusted(db, sql, NULL);
   for (unsigned i = 0; i < settings; i++) {
-    const uint8_t *setting = in->data;
-    if (apply_setting(db, "aux", in, NULL) == SET_SALT) uniqueness_note_explicit_salt(file);
-    record(file, STEP_SETTING, setting, in->data);
+    if (written) plain_exempt[file] = 1; /* As in op_setting. */
+    run_trusted(db, setting_sql[i], NULL);
+    if (setting_kind[i] == SET_SALT) uniqueness_note_explicit_salt(file);
+    record(file, STEP_SETTING, setting_slice[i].data, setting_slice[i].data + setting_slice[i].size);
   }
-  unsigned move = u8(in) % (sizeof moves / sizeof *moves);
   /* Export only adds tables, so the target must still hold every source table unchanged. Attach alters nothing. */
   /* Export into aux reads main, every other move reads aux. */
   if (move == 0) model_snapshot(lib, db, "main", db_file);
   else model_snapshot(lib, db, "aux", file);
+  /* sqlcipher_export does not exist in plain SQLite, so only the codec run fills the export's target. */
+  if (move == 0) plain_exempt[file] = 1;
+  else if (move == 1) plain_exempt[db_file] = 1;
   if (run_trusted(db, moves[move], NULL) != SQLITE_OK) {
     model_discard();
   } else if (move == 0) {
@@ -692,24 +800,40 @@ static void op_attach(struct input *in) {
   run_trusted(db, "DETACH aux", NULL);
 }
 
-static void op_backup(struct input *in) {
-  unsigned target = u8(in);
-  const uint8_t *start = in->data;
+struct backup_args {
+  unsigned target;
+  const uint8_t *start, *end;
   struct key key;
-  read_key(in, &key);
+};
+
+static void read_backup(struct input *in, struct backup_args *args) {
+  args->target = u8(in);
+  args->start = in->data;
+  read_key(in, &args->key);
+  args->end = in->data;
+}
+
+static int backup_target(const struct backup_args *args) {
+  return (db_file + 1 + (int)(args->target % 2)) % SCRIPT_FILES;
+}
+
+static void run_backup(const struct backup_args *args) {
   if (!db) return;
   touched = 1;
-  int file = (db_file + 1 + (int)(target % 2)) % SCRIPT_FILES;
+  int file = backup_target(args);
   sqlite3 *dest = open_file(file, 1);
   if (!dest) return;
   confidentiality_forget_file(file);
   recipes[file].count = 0;
-  recipes[file].passphrase = key.passphrase;
-  int rc = apply_key(dest, "main", &key, 0, NULL);
-  if (rc == SQLITE_OK) verify_key(dest, "main", file, key.len);
-  note_salted_key(file, &key, rc);
-  record(file, STEP_KEY, start, in->data);
+  recipes[file].passphrase = args->key.passphrase;
+  int rc = apply_key(dest, "main", &args->key, 0, NULL);
+  if (rc == SQLITE_OK && lib->key_v2) verify_key(dest, "main", file, args->key.len);
+  note_salted_key(file, &args->key, rc);
+  record(file, STEP_KEY, args->start, args->end);
+  /* Plain SQLite copies whatever the codec refuses or fails to back up, plaintext into keyed included. */
+  int backed_up = 0;
   if (known_backup_blocked(major, fuzz_codec_page_size(lib, db), fuzz_codec_page_size(lib, dest))) {
+    plain_exempt[file] = 1;
     uniqueness_check(lib, dest, "main", file, files[file]);
     lib->close_v2(dest);
     return;
@@ -721,9 +845,18 @@ static void op_backup(struct input *in) {
     lib->backup_finish(backup);
     if (step_rc == SQLITE_DONE) model_check(lib, dest, "main", file, files[file], "backup");
     else model_discard();
+    backed_up = step_rc == SQLITE_DONE;
+    if (backed_up && plain_exempt[db_file]) plain_exempt[file] = 1; /* A copy holds what made its source differ. */
   }
+  if (!backed_up && lib->key_v2) plain_exempt[file] = 1;
   uniqueness_check(lib, dest, "main", file, files[file]);
   lib->close_v2(dest);
+}
+
+static void op_backup(struct input *in) {
+  struct backup_args args;
+  read_backup(in, &args);
+  run_backup(&args);
 }
 
 /* The script file index memvfs slot index names, or -1 for a temp or super-journal file. */
@@ -751,6 +884,8 @@ static void op_damage(struct input *in) {
   if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, len)) return;
   int file = file_of_memvfs(index);
   tamper_prune(file, memvfs_name(index));
+  /* The same bytes are ciphertext on one side and plaintext on the other. */
+  if (file >= 0) plain_exempt[file] = 1;
   /* Raw damage writes input bytes, which mutators copy around, so an IV or salt there is no draw. */
   if (kind != 1) uniqueness_note_damage(file);
   model_note_damage(file);
@@ -774,6 +909,14 @@ static void op_cache_race(struct input *in) {
   unsigned kind = u8(in) % 3;
   unsigned char mask = u8(in) | 1;
   unsigned page_offset = u16(in);
+  unsigned page_draw = u32(in);
+  /* Parsed before any return, since plain SQLite has no codec page and returns below while the codec run goes on. */
+  const uint8_t *key_start = in->data;
+  struct key key;
+  struct backup_args backup;
+  if (kind == 0) read_key(in, &key);
+  else if (kind == 1) read_backup(in, &backup);
+  const uint8_t *key_end = in->data;
   if (!db) return;
   int count = memvfs_count();
   if (!count) return;
@@ -782,7 +925,7 @@ static void op_cache_race(struct input *in) {
   long long size = memvfs_size(index);
   int page_size = fuzz_codec_page_size(lib, db);
   if (!size || page_size <= 0) return;
-  long long pgno = size / page_size ? (long long)(u32(in) % (unsigned long long)(size / page_size)) + 1 : 1;
+  long long pgno = size / page_size ? (long long)(page_draw % (unsigned long long)(size / page_size)) + 1 : 1;
   long long at = (pgno - 1) * page_size + (long long)(page_offset % (unsigned)page_size);
   if (known_header_edit(major, memvfs_starts_with(index, "SQLite format 3", 16), at, 1)) return;
   touched = 1;
@@ -795,22 +938,22 @@ static void op_cache_race(struct input *in) {
     }
   }
   tamper_prune(db_file, memvfs_name(index));
+  /* The plain run returned above, having no codec page to flip and so no copy of one to make. */
+  plain_exempt[db_file] = 1;
+  if (kind == 1) plain_exempt[backup_target(&backup)] = 1;
   memvfs_flip(index, at, mask);
   tamper_flip(db_file, memvfs_name(index), at, mask);
   uniqueness_note_damage(db_file);
   model_note_damage(db_file);
   if (kind == 0) {
-    const uint8_t *start = in->data;
-    struct key key;
-    read_key(in, &key);
     int rc = apply_key(db, "main", &key, 1, NULL);
-    if (rc == SQLITE_OK && key.len > 0) confidentiality_mark_keyed(db_file);
-    else if (rc == SQLITE_OK) confidentiality_forget_file(db_file);
+    if (rc == SQLITE_OK && lib->rekey_v2 && key.len > 0) confidentiality_mark_keyed(db_file);
+    else if (rc == SQLITE_OK && lib->rekey_v2) confidentiality_forget_file(db_file);
     note_salted_key(db_file, &key, rc);
-    record(db_file, STEP_KEY, start, in->data);
+    record_rekey(db_file, key_start, key_end, rc);
     if (key.passphrase) recipes[db_file].passphrase = 1;
   } else if (kind == 1) {
-    op_backup(in);
+    run_backup(&backup);
   } else if (!vacuum_blocked(db, known_vacuum("VACUUM", 6))) {
     run(db, "VACUUM", NULL);
   }
@@ -820,15 +963,17 @@ static void op_cache_race(struct input *in) {
 static void op_fault_txn(struct input *in) {
   static const enum fault_kind kinds[] = {FAULT_SHORT_READ, FAULT_SHORT_WRITE, FAULT_ENOSPC, FAULT_FSYNC,
                                           FAULT_ALLOC};
+  enum fault_kind kind = kinds[u8(in) % (sizeof kinds / sizeof *kinds)];
+  unsigned countdown = u8(in);
+  unsigned blob = u16(in) % (MAX_BLOB + 1);
   if (!db || !lib->get_autocommit(db)) return;
   /* L12: a commit with an attached schema of another cipher_page_size reads past main's page buffer. */
   int main_page_size = lib_int(lib, db, "PRAGMA main.cipher_page_size");
   int aux_page_size = lib_int(lib, db, "PRAGMA aux.cipher_page_size");
   if (aux_page_size > 0 && aux_page_size != main_page_size) return;
   touched = 1;
-  enum fault_kind kind = kinds[u8(in) % (sizeof kinds / sizeof *kinds)];
-  unsigned countdown = u8(in);
-  unsigned blob = u16(in) % (MAX_BLOB + 1);
+  /* The same countdown lands on different I/O in a codec connection, which reads and writes more per statement. */
+  plain_exempt[db_file] = 1;
   fault_arm(kind, countdown);
   int rc = run_trusted(db, "BEGIN IMMEDIATE", NULL);
   if (rc == SQLITE_OK) rc = run_trusted(db, "CREATE TABLE IF NOT EXISTS t(a INTEGER PRIMARY KEY, b BLOB, c TEXT)", NULL);
@@ -859,10 +1004,11 @@ static void op_fault_txn(struct input *in) {
   }
   db_file = file;
   if (replay(db, file, NULL)) { /* L8 */
-    close_db();
+    close_mismatched();
     if (check) model_discard();
   } else if (check) {
     model_check(lib, db, "main", file, files[file], committed ? "fault-commit" : "fault-rollback");
+    touched = 1; /* The check read the file, so a later key would be position D. */
   }
 }
 
@@ -873,7 +1019,7 @@ static void op_raw_sql(struct input *in) {
   sql[text.size] = 0;
   if (!db) return;
   run(db, sql, NULL);
-  if (header_mismatch(db, db_file)) close_db(); /* L8 */
+  if (header_mismatch(db, db_file)) close_mismatched(); /* L8 */
 }
 
 static void use(const struct fuzz_sqlite *api) {
@@ -894,6 +1040,9 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
   use(api);
   budget = SCRIPT_BUDGET;
   memset(recipes, 0, sizeof recipes);
+  memset(plain_exempt, 0, sizeof plain_exempt);
+  plain_diverged = 0;
+  blob_state = 0;
   for (int n = 0; n < MAX_OPS && in->size; n++) {
     unsigned opcode = u8(in) & OP_MASK;
     if (opcode >= OP_COUNT) continue; /* Reserved for a future op: no-op. */
@@ -904,6 +1053,8 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       close_db();
       db = open_file(file, 1);
       if (db) db_file = file;
+      /* The codec connection no longer knows the key the file was written with, while plain SQLite needs none. */
+      if (recipe_keyed(file)) plain_exempt[file] = 1;
       memset(&recipes[file], 0, sizeof recipes[file]);
       confidentiality_forget_file(file);
       break;
@@ -922,10 +1073,11 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       }
       db_file = file;
       if (replay(db, file, NULL)) { /* L8 */
-        close_db();
+        close_mismatched();
         if (check) model_discard();
       } else if (check) {
         model_check(lib, db, "main", file, files[file], "reopen");
+        touched = 1; /* The check read the file, so a later key would be position D. */
       }
       break;
     }
@@ -994,5 +1146,19 @@ void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out) {
     read_all(handle, out);
     tamper_check(lib, handle, file, files[file]);
   }
+  lib->close_v2(handle);
+}
+
+int script_plain_exempt(int file) {
+  return plain_diverged || (file >= 0 && file < SCRIPT_FILES && plain_exempt[file]);
+}
+
+void script_dump_content(const struct fuzz_sqlite *api, int file, struct dump *out) {
+  use(api);
+  budget = DUMP_BUDGET;
+  sqlite3 *handle = open_file(file, 0);
+  if (!handle) return;
+  if (!replay(handle, file, NULL)) read_tables(handle, out, 0);
+  else plain_exempt[file] = 1; /* L8: the codec run cannot read back what it wrote under these settings. */
   lib->close_v2(handle);
 }
