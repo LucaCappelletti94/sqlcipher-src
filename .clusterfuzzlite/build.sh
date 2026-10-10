@@ -134,3 +134,8 @@ target differential differential -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSS
 # shellcheck disable=SC2086
 $CXX $CXXFLAGS "$WORK/differential.o" "${script_units[@]}" "$WORK/release_libtomcrypt.o" "$WORK/release_openssl.o" \
     "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential"
+target differential_plain differential_plain -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_PLAIN=fuzz_sqlite_release_plain
+# shellcheck disable=SC2086
+$CXX $CXXFLAGS "$WORK/differential_plain.o" "${script_units[@]}" "$WORK/release_libtomcrypt.o" "$WORK/release_plain.o" \
+    $LIB_FUZZING_ENGINE -o "$OUT/differential_plain"
+cp codec.dict "$OUT/differential_plain.dict"

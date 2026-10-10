@@ -80,6 +80,10 @@ int known_migrate_poisons(int already_touched) {
   return already_touched; /* L11 */
 }
 
+int known_rekey_commits_transaction(int autocommit) {
+  return !autocommit; /* L13 */
+}
+
 /* L7: sqlcipherCodecGetKey copies a zero-length pass that its callers never free. */
 const char *__lsan_default_suppressions(void);
 const char *__lsan_default_suppressions(void) {
