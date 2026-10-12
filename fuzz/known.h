@@ -33,4 +33,7 @@ int known_migrate_poisons(int already_touched);
 /* L13: a rekey inside an open transaction commits it, so the application's later ROLLBACK restores nothing. */
 int known_rekey_commits_transaction(int autocommit);
 
+/* sqlcipher#623: 5.0 advertises shared memory memvfs lacks, so after WAL every write without exclusive locking fails. */
+int known_wal_without_shm(int major);
+
 #endif

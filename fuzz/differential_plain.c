@@ -30,6 +30,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
 
   fuzz_reset_all();
+  script_parse_like(&FUZZ_LIBTOMCRYPT); /* So both runs read the same ops from the input. */
   script_reset(&FUZZ_PLAIN);
   script_run(&FUZZ_PLAIN, &plain_in, SCRIPT_STRUCTURED);
   for (int file = 0; file < SCRIPT_FILES; file++) {
@@ -45,5 +46,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     dump_free(&plain_dump);
     dump_free(&cipher_dump[file]);
   }
+  script_parse_like(NULL);
   return 0;
 }

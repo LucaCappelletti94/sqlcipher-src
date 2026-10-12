@@ -20,6 +20,9 @@ jobs:
         sanitizer: [address, undefined]
     steps:
       - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
+        env:
+          # ClusterFuzzLite passes CFL_EXTRA_ variables into the build, where this one leaves out beta and prerelease.
+          CFL_EXTRA_FUZZ_RELEASE_ONLY: "1"
         with:
           language: c
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -31,16 +34,21 @@ jobs:
           mode: code-change
           sanitizer: ${{ matrix.sanitizer }}
 
-  # MSan fuzzing runs in batch only, so a PR still has to show its memory build compiles.
-  build-memory:
-    name: Build (memory)
+  # Builds PR fuzzing skips, so a PR still shows they compile: MSan, which fuzzes in batch only, and the beta and
+  # prerelease lines.
+  build:
+    name: Build (${{ matrix.sanitizer }})
     runs-on: ubuntu-latest
     concurrency:
-      group: ${{ github.workflow }}-memory-${{ github.ref }}
+      group: ${{ github.workflow }}-build-${{ matrix.sanitizer }}-${{ github.ref }}
       cancel-in-progress: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, memory]
     steps:
       - uses: google/clusterfuzzlite/actions/build_fuzzers@884713a6c30a92e5e8544c39945cd7cb630abcd1 # v1
         with:
           language: c
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          sanitizer: memory
+          sanitizer: ${{ matrix.sanitizer }}
