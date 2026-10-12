@@ -94,17 +94,31 @@ state_units=("$WORK/libstate.o" "$WORK/memvfs.o" "$WORK/known.o" "$WORK/random.o
 script_units=("$WORK/script.o" "${state_units[@]}")
 file_units=("$WORK/app.o" "$WORK/rawfile.o" "${state_units[@]}")
 
+# MSan needs every linked object instrumented, and the static libcrypto is not, so a memory build leaves out the OpenSSL
+# provider and the differential target. It also leaves out the private heap, which fills its arena with random bytes
+# up front, so MSan would see every allocation from it as initialised.
+msan=0
+[ "${SANITIZER:-}" != memory ] || msan=1
+
 # The system heap lets AddressSanitizer see overflows that SQLCipher's private heap arena hides.
-spawn release libtomcrypt libtomcrypt.c "$WORK/libtomcrypt.o" "${WRAPPER[@]}"
+if [ "$msan" = 0 ]; then
+    spawn release libtomcrypt libtomcrypt.c "$WORK/libtomcrypt.o" "${WRAPPER[@]}"
+    spawn release openssl openssl.c "" -iquote ../sqlcipher
+fi
 spawn release libtomcrypt_system_heap libtomcrypt.c "$WORK/libtomcrypt.o" "${WRAPPER[@]}" -DSQLCIPHER_OMIT_MALLOC
-spawn release openssl openssl.c "" -iquote ../sqlcipher
 # Plain SQLite from the same amalgamation, the reference keyed_file compares SQLCipher against.
 spawn release plain plain.c "" -iquote ../sqlcipher
 wait
 [ ! -e "$WORK/failed" ] || { echo "a SQLCipher library failed to compile" >&2; exit 1; }
 
 libtomcrypt=fuzz_sqlite_release_libtomcrypt
-for heap in "" _system_heap; do
+heaps=("" _system_heap)
+plain_heap=""
+if [ "$msan" = 1 ]; then
+    heaps=(_system_heap)
+    plain_heap=_system_heap
+fi
+for heap in "${heaps[@]}"; do
     target codec "codec$heap" -DFUZZ_LIBTOMCRYPT="$libtomcrypt$heap"
     # shellcheck disable=SC2086
     $CXX $CXXFLAGS "$WORK/codec$heap.o" "${script_units[@]}" "$WORK/release_libtomcrypt$heap.o" \
@@ -129,13 +143,16 @@ for heap in "" _system_heap; do
     cp "$OUT/${binary}_seed_corpus.zip" "$OUT/${keyed}_seed_corpus.zip"
     printf '[libfuzzer]\nmax_len = 200000\n' | tee "$OUT/$binary.options" > "$OUT/$keyed.options"
 done
-# OpenSSL links statically, since the runner image that executes the targets has no libcrypto.
-target differential differential -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL=fuzz_sqlite_release_openssl
+if [ "$msan" = 0 ]; then
+    # OpenSSL links statically, since the runner image that executes the targets has no libcrypto.
+    target differential differential -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_OPENSSL=fuzz_sqlite_release_openssl
+    # shellcheck disable=SC2086
+    $CXX $CXXFLAGS "$WORK/differential.o" "${script_units[@]}" "$WORK/release_libtomcrypt.o" "$WORK/release_openssl.o" \
+        "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential"
+fi
+target differential_plain differential_plain -DFUZZ_LIBTOMCRYPT="$libtomcrypt$plain_heap" \
+    -DFUZZ_PLAIN=fuzz_sqlite_release_plain
 # shellcheck disable=SC2086
-$CXX $CXXFLAGS "$WORK/differential.o" "${script_units[@]}" "$WORK/release_libtomcrypt.o" "$WORK/release_openssl.o" \
-    "$LIBCRYPTO" -ldl -pthread $LIB_FUZZING_ENGINE -o "$OUT/differential"
-target differential_plain differential_plain -DFUZZ_LIBTOMCRYPT="$libtomcrypt" -DFUZZ_PLAIN=fuzz_sqlite_release_plain
-# shellcheck disable=SC2086
-$CXX $CXXFLAGS "$WORK/differential_plain.o" "${script_units[@]}" "$WORK/release_libtomcrypt.o" "$WORK/release_plain.o" \
-    $LIB_FUZZING_ENGINE -o "$OUT/differential_plain"
+$CXX $CXXFLAGS "$WORK/differential_plain.o" "${script_units[@]}" "$WORK/release_libtomcrypt$plain_heap.o" \
+    "$WORK/release_plain.o" $LIB_FUZZING_ENGINE -o "$OUT/differential_plain"
 cp codec.dict "$OUT/differential_plain.dict"

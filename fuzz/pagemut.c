@@ -1,5 +1,16 @@
 #include <string.h>
 
+#if defined(__has_feature)
+#if __has_feature(memory_sanitizer)
+#include <sanitizer/msan_interface.h>
+/* libFuzzer is uninstrumented, so MSan sees what its mutator copies in from the corpus as uninitialised. */
+#define UNPOISON(bytes, len) __msan_unpoison(bytes, len)
+#endif
+#endif
+#ifndef UNPOISON
+#define UNPOISON(bytes, len) ((void)(bytes), (void)(len))
+#endif
+
 #include "app.h"
 #include "libstate.h"
 #include "memvfs.h"
@@ -64,6 +75,7 @@ size_t pagemut_mutate(const struct fuzz_sqlite *api, uint8_t *data, size_t size,
     int len = pagemut_read_page(api, db, pgno, page);
     if (len > 0) {
       mutate(page, (size_t)len, (size_t)len);
+      UNPOISON(page, (size_t)len);
       if (write_page(api, db, pgno, page, len) == SQLITE_OK) result = 1;
     }
   }
