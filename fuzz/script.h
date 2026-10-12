@@ -35,6 +35,15 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
 /* Opens a file with the key and settings the last run left recorded for it, and reads all of it back. */
 void script_dump(const struct fuzz_sqlite *api, int file, struct dump *out);
 
+/* Like script_dump, but only table rows and integrity_check, which plain SQLite can reproduce. */
+void script_dump_content(const struct fuzz_sqlite *api, int file, struct dump *out);
+
+/* Whether the last run, or the script_dump_content after it, did something to file plain SQLite cannot reproduce. */
+int script_plain_exempt(int file);
+
+/* Whether raw damage in the last run hit file. */
+int script_damaged(int file);
+
 void dump_free(struct dump *out);
 
 #endif
