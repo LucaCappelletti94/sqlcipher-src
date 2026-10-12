@@ -17,6 +17,7 @@ const struct fuzz_sqlite FUZZ_LIBRARY = {
     .name = FUZZ_NAME(FUZZ_LIBRARY),
     .open_v2 = sqlite3_open_v2,
     .close_v2 = sqlite3_close_v2,
+    .get_autocommit = sqlite3_get_autocommit,
     .prepare_v2 = sqlite3_prepare_v2,
     .step = sqlite3_step,
     .finalize = sqlite3_finalize,
