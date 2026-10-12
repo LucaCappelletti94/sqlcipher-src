@@ -84,6 +84,10 @@ int known_rekey_commits_transaction(int autocommit) {
   return !autocommit; /* L13 */
 }
 
+int known_wal_without_shm(int major) {
+  return major >= 5; /* sqlcipher#623 */
+}
+
 /* L7: sqlcipherCodecGetKey copies a zero-length pass that its callers never free. */
 const char *__lsan_default_suppressions(void);
 const char *__lsan_default_suppressions(void) {

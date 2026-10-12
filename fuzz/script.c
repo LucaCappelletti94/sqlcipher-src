@@ -80,6 +80,9 @@ struct key {
 static const struct fuzz_sqlite *lib;
 /* SQLCipher major version of lib, since 5.x drops and adds codec pragmas. */
 static int major;
+/* The major version inputs parse as, which a plain SQLite run borrows from the SQLCipher run it is compared with. */
+static int parse_major;
+static const struct fuzz_sqlite *parse_like;
 static sqlite3 *db;
 static int db_file = -1;
 /* Set once the open connection has read or written its file, which ends the window for a first key. */
@@ -361,7 +364,7 @@ static int apply_key(sqlite3 *handle, const char *schema, const struct key *key,
 
 static unsigned page_size(struct input *in) {
   unsigned pick = u8(in);
-  return known_page_size(major, pick % 16 < 8 ? 512u << (pick % 8) : u16(in));
+  return known_page_size(parse_major, pick % 16 < 8 ? 512u << (pick % 8) : u16(in));
 }
 
 static const char *pick(struct input *in, const char *const *choices, size_t count) {
@@ -409,8 +412,8 @@ static enum setting format_setting(struct input *in, const char *schema, char *s
   unsigned char random_data[24];
   char random_hex[49];
   unsigned choice = u8(in);
-  enum setting setting = major < 5 ? settings_4[choice % (sizeof settings_4 / sizeof *settings_4)]
-                                   : settings_5[choice % (sizeof settings_5 / sizeof *settings_5)];
+  enum setting setting = parse_major < 5 ? settings_4[choice % (sizeof settings_4 / sizeof *settings_4)]
+                                         : settings_5[choice % (sizeof settings_5 / sizeof *settings_5)];
   switch (setting) {
   case SET_PAGE_SIZE:
     snprintf(sql, cap, "PRAGMA \"%s\".cipher_page_size = %u", schema, page_size(in));
@@ -502,6 +505,13 @@ static void record(int file, enum step_kind kind, const uint8_t *start, const ui
 /* A failed rekey leaves the old key in place, while replaying it as a key would apply the new one. */
 static void record_rekey(int file, const uint8_t *start, const uint8_t *end, int rc) {
   if (rc != SQLITE_OK) return;
+  struct input slice = {start, (size_t)(end - start)};
+  struct key key;
+  read_key(&slice, &key);
+  if (key.len == 0) { /* 5.x writes the file back in plaintext, which opens with no key or setting at all. */
+    memset(&recipes[file], 0, sizeof recipes[file]);
+    return;
+  }
   trusted = 1;
   int kdf_iter = lib_int(lib, db, "PRAGMA main.kdf_iter");
   trusted = 0;
@@ -682,6 +692,7 @@ static void op_pragma(struct input *in) {
   /* page_size is cipher_page_size here, so it pins a written file as op_setting's settings do. */
   if (index == 7 && file_written(db_file)) plain_exempt[db_file] = 1;
   run_trusted(db, sql, NULL);
+  if (known_wal_without_shm(major) && strcmp(sql, "PRAGMA journal_mode = WAL") == 0) plain_exempt[db_file] = 1;
   if (header_mismatch(db, db_file)) close_mismatched(); /* L8 */
 }
 
@@ -1032,9 +1043,12 @@ static void op_raw_sql(struct input *in) {
   if (header_mismatch(db, db_file)) close_mismatched(); /* L8 */
 }
 
+void script_parse_like(const struct fuzz_sqlite *api) { parse_like = api; }
+
 static void use(const struct fuzz_sqlite *api) {
   lib = api;
   major = lib_major(api);
+  parse_major = parse_like ? lib_major(parse_like) : major;
 }
 
 void script_reset(const struct fuzz_sqlite *api) {

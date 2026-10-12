@@ -29,6 +29,9 @@ enum script_mode {
 /* Puts the library's process-wide settings back to the same state before every input. */
 void script_reset(const struct fuzz_sqlite *api);
 
+/* Makes later runs and dumps parse inputs as api would, or as their own library when api is NULL. */
+void script_parse_like(const struct fuzz_sqlite *api);
+
 /* Runs the operations the input encodes and closes every connection it opened. */
 void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mode mode);
 
