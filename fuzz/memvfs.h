@@ -22,6 +22,10 @@ long long memvfs_size(int index);
 int memvfs_starts_with(int index, const void *prefix, size_t len);
 /* The page size a plaintext SQLite header in the named file declares, or 0 when the file has none. */
 int memvfs_header_page_size(const char *name);
+/* Creates a named file holding bytes, for inputs that are file images. */
+int memvfs_install(const char *name, const unsigned char *bytes, size_t len);
+/* The current bytes of a named file, open or not, or NULL. Valid until the next write to that file. */
+const unsigned char *memvfs_peek(const char *name, size_t *len);
 void memvfs_flip(int index, long long offset, unsigned char mask);
 void memvfs_truncate(int index, long long size);
 void memvfs_overwrite(int index, long long offset, const unsigned char *bytes, size_t len);
