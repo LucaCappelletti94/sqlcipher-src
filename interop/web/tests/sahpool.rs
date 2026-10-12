@@ -15,6 +15,21 @@ const PASS: &str = "PRAGMA key = 'correct horse battery staple'";
 const RAW: &str =
     "PRAGMA key = \"x'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\"";
 
+#[cfg(sqlcipher_vfs_shim)]
+extern "C" {
+    /// Wraps the current default VFS in `sqlciphervfs`, replacing whichever VFS it wrapped before.
+    fn sqlcipher_register_vfs() -> std::ffi::c_int;
+}
+
+/// The VFS a test opens pool's files through, since SQLCipher 5 keys only files opened through `sqlciphervfs`.
+const fn through(pool: &'static str) -> &'static str {
+    if cfg!(sqlcipher_vfs_shim) {
+        "sqlciphervfs"
+    } else {
+        pool
+    }
+}
+
 struct Db(*mut ffi::sqlite3);
 
 impl Db {
@@ -110,18 +125,23 @@ fn populate(db: &Db) {
     clippy::future_not_send,
     reason = "OpfsSAHPoolUtil uses Rc and is wasm-only"
 )]
-async fn make_pool(vfs_name: &'static str) -> OpfsSAHPoolUtil {
-    install::<WasmOsCallback>(
+async fn make_pool(pool: &'static str) -> OpfsSAHPoolUtil {
+    let util = install::<WasmOsCallback>(
         &OpfsSAHPoolCfgBuilder::new()
-            .vfs_name(vfs_name)
-            .directory(&format!("sqlcipher-sahpool-tests/{vfs_name}"))
+            .vfs_name(pool)
+            .directory(&format!("sqlcipher-sahpool-tests/{pool}"))
             .clear_on_init(true)
             .initial_capacity(6)
             .build(),
-        false,
+        cfg!(sqlcipher_vfs_shim),
     )
     .await
-    .unwrap()
+    .unwrap();
+    // sqlciphervfs wraps the VFS that is the default when it registers, which the install just made the pool.
+    #[cfg(sqlcipher_vfs_shim)]
+    // SAFETY: the call takes no arguments, and this single-threaded worker has no other code touching the VFS list.
+    assert_eq!(unsafe { sqlcipher_register_vfs() }, ffi::SQLITE_OK);
+    util
 }
 
 #[wasm_bindgen_test]
@@ -130,8 +150,9 @@ async fn make_pool(vfs_name: &'static str) -> OpfsSAHPoolUtil {
     reason = "OpfsSAHPoolUtil uses Rc and is wasm-only"
 )]
 async fn ffi_encrypted_on_sahpool() {
-    const VFS: &str = "sqlcipher-sahpool-ffi";
-    let util = make_pool(VFS).await;
+    const POOL: &str = "sqlcipher-sahpool-ffi";
+    const VFS: &str = through(POOL);
+    let util = make_pool(POOL).await;
 
     // WAL needs shared memory, which sahpool lacks, so the rollback journal is used.
     {
@@ -224,8 +245,9 @@ async fn ffi_encrypted_on_sahpool() {
     reason = "OpfsSAHPoolUtil uses Rc and is wasm-only"
 )]
 async fn rusqlite_encrypted_on_sahpool() {
-    const VFS: &str = "sqlcipher-sahpool-rl";
-    let util = make_pool(VFS).await;
+    const POOL: &str = "sqlcipher-sahpool-rl";
+    const VFS: &str = through(POOL);
+    let util = make_pool(POOL).await;
 
     // Write via rusqlite with a named VFS and passphrase key.
     {
@@ -309,8 +331,9 @@ async fn rusqlite_encrypted_on_sahpool() {
     reason = "OpfsSAHPoolUtil uses Rc and is wasm-only"
 )]
 async fn rekey_on_sahpool() {
-    const VFS: &str = "sqlcipher-sahpool-rekey";
-    let util = make_pool(VFS).await;
+    const POOL: &str = "sqlcipher-sahpool-rekey";
+    const VFS: &str = through(POOL);
+    let util = make_pool(POOL).await;
 
     // Write with the original passphrase.
     {
