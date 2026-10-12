@@ -24,13 +24,7 @@ if [ -n "${SANITIZE:-}" ]; then
     export ASAN_OPTIONS UBSAN_OPTIONS
 fi
 
-# The wrapper at the revision interop/web pins, as cargo resolves it.
-SHIM=$(cargo metadata --locked --format-version 1 --manifest-path "$ROOT/interop/web/Cargo.toml" |
-    jq -r '.packages[] | select(.name == "sqlite-wasm-rs" and (.source | startswith("git+"))) | .manifest_path' |
-    xargs dirname)/shim
-for unit in sqlcipher-wasm.c sqlcipher-entropy.c sqlcipher-ltc.h; do
-    [ -f "$SHIM/$unit" ] || { echo "no sqlite-wasm-rs $unit in $SHIM" >&2; exit 1; }
-done
+SHIM=$(wasm_shim)
 LTC="$ROOT/sqlcipher/libtomcrypt"
 
 trust_keys "$WORK"
