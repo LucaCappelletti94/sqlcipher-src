@@ -5,11 +5,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: cargo
     directory: /interop/native
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: cargo
     directory: /interop/web
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
