@@ -38,8 +38,8 @@ version=$(sed -nE 's/^#define CIPHER_VERSION_NUMBER ([^ ]+)$/\1/p' "$OUT/sources
 [ -n "$version" ] || { echo "no CIPHER_VERSION_NUMBER in the generated sqlcipher.c" >&2; exit 1; }
 [ "$LEG" != next ] || [ "$version" = "$SQLCIPHER_NEXT_VERSION" ] ||
     { echo "SQLCipher v$SQLCIPHER_NEXT_VERSION calls itself $version" >&2; exit 1; }
-# Quoted so a dot-sourced shell and GitHub's environment keep the spaces in the flags.
+# Unquoted, since $GITHUB_ENV keeps everything after the = as the value, quotes included.
 printf 'SQLCIPHER_LEG=%s\nSQLCIPHER_LEG_COMMIT=%s\nSQLCIPHER_LEG_VERSION=%s\n' "$LEG" "$commit" "$version" > "$OUT/leg.env"
-printf "SQLCIPHER_LEG_FLAGS='%s'\n" "$SQLCIPHER_LEG_FLAGS" >> "$OUT/leg.env"
+printf 'SQLCIPHER_LEG_FLAGS=%s\n' "$SQLCIPHER_LEG_FLAGS" >> "$OUT/leg.env"
 rm -rf "$OUT/sqlcipher.git" "$OUT/gnupg" "$OUT/libtomcrypt" "$OUT"/libtomcrypt.tar.xz*
 echo "SQLCipher $LEG leg at $commit, version $version"
