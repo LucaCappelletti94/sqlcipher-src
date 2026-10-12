@@ -9,6 +9,8 @@
 /* Progress callbacks, each every 100 VDBE ops, before an input's statements are interrupted. */
 #define BUDGET 20000
 #define MAX_TABLES 8
+/* A hostile FTS5 index sizes its buffers from file bytes, up to 1 GiB, which MSan's shadow makes resident. */
+#define HEAP_LIMIT (256 << 20)
 
 static const char *const names[RAWFILE_KINDS] = {"main.db", "main.db-wal", "main.db-journal"};
 
@@ -127,6 +129,7 @@ void app_run(const struct fuzz_sqlite *api, const struct rawfile *in) {
   lib = api;
   major = lib_major(api);
   budget = BUDGET;
+  lib->hard_heap_limit64(HEAP_LIMIT);
   for (int kind = 0; kind < RAWFILE_KINDS; kind++) {
     if (in->files[kind].bytes) memvfs_install(names[kind], in->files[kind].bytes, in->files[kind].len);
   }
