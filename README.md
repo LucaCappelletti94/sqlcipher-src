@@ -6,6 +6,7 @@
 [![codecov](https://codecov.io/gh/LucaCappelletti94/sqlcipher-src/graph/badge.svg?token=iyDt4aR7wE)](https://codecov.io/gh/LucaCappelletti94/sqlcipher-src)
 [![Quality gate](https://sonarcloud.io/api/project_badges/measure?project=LucaCappelletti94_sqlcipher-wasm-src&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=LucaCappelletti94_sqlcipher-wasm-src)
 [![SQLCipher release](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-release.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-release.yml)
+[![SQLCipher branches](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-branches.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-branches.yml)
 [![crates.io](https://img.shields.io/crates/v/sqlcipher-src.svg)](https://crates.io/crates/sqlcipher-src)
 [![docs.rs](https://docs.rs/sqlcipher-src/badge.svg)](https://docs.rs/sqlcipher-src)
 [![license](https://img.shields.io/badge/license-MIT%20AND%20BSD--3--Clause%20AND%20blessing%20AND%20WTFPL-blue.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/blob/main/Cargo.toml)
@@ -33,6 +34,8 @@ for source in sqlcipher_src::LIBTOMCRYPT_SOURCES {
 The `sqlcipher` feature of [`sqlite-wasm-rs`](https://github.com/Spxg/sqlite-wasm-rs) builds this way for `wasm32-unknown-unknown`.
 
 The sources are generated from signed SQLCipher and libtomcrypt releases by `upgrade.sh` and ship as released, except that `SOURCE_FILE` skips SQLCipher's `.fini_array` finalizer on `__wasm__`, which cannot hold that section, until [sqlcipher/sqlcipher#622](https://github.com/sqlcipher/sqlcipher/pull/622) is released. CI runs SQLCipher's and `rusqlite`'s SQLCipher tests on them natively, and checks through `sqlite-wasm-rs` that files written natively and in Node, Chrome and Firefox open on both sides.
+
+The same checks run on SQLCipher's newest signed pre-release, and daily on the heads of its `prerelease` and `beta` branches. Nothing from those lines ships.
 
 [ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) fuzzes SQLCipher as `sqlite-wasm-rs` compiles it, under `AddressSanitizer`, `UndefinedBehaviorSanitizer` and `MemorySanitizer`, on the shipped release, SQLCipher's newest signed pre-release and its `prerelease` branch. A script target drives keys, rekeys, codec settings, attach, backup, export, page damage and injected I/O and allocation faults. It checks that a tampered page never reads back as valid, that no plaintext reaches a keyed file, that IVs and salts never repeat, that operations meant to keep content keep it, and that the rows match what plain SQLite and the OpenSSL provider produce. Two file-image targets hand SQLCipher hostile database files, one without the key and one with it.
 

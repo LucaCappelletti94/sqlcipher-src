@@ -3,18 +3,11 @@ use sqlite_wasm_rs as ffi;
 use sqlite_wasm_rs::vfs::memvfs::MemVfsUtil;
 use sqlite_wasm_rs::vfs::transfer::DbTransfer;
 use std::ffi::{CStr, CString};
-use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-#[wasm_bindgen(module = "fs")]
-extern "C" {
-    #[wasm_bindgen(js_name = readFileSync)]
-    fn read_file_sync(path: &str) -> Vec<u8>;
-    #[wasm_bindgen(js_name = writeFileSync)]
-    fn write_file_sync(path: &str, data: &[u8]);
-}
+pub mod common;
+use common::{keyed, read_file_sync, write_file_sync, DIR};
 
-const DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../fixtures");
 // KDF settings only affect passphrase keys, so every case uses one.
 const PASS: &str = "PRAGMA key = 'correct horse battery staple'";
 
@@ -147,12 +140,19 @@ fn integrity_check_row(db: &Db) -> Option<String> {
     row
 }
 
-/// Asserts `cipher_integrity_check` returns no rows or the expected HMAC-disabled message.
+/// Messages `cipher_integrity_check` gives for a file with no page authentication, from SQLCipher 4 and 5.
+const NO_AUTHENTICATION: [&str; 2] = [
+    "HMAC is not enabled, unable to integrity check",
+    "Authentication is not enabled, unable to integrity check",
+];
+
+/// Asserts `cipher_integrity_check` returns no rows or says the file has no page authentication.
 fn assert_integrity(db: &Db, label: &str) {
     let row = integrity_check_row(db);
     // cipher_use_hmac = OFF and compat1 always produce this message instead of an empty result
     assert!(
-        row.is_none() || row.as_deref() == Some("HMAC is not enabled, unable to integrity check"),
+        row.as_deref()
+            .is_none_or(|row| NO_AUTHENTICATION.contains(&row)),
         "{label}: unexpected cipher_integrity_check row: {row:?}"
     );
 }
@@ -196,16 +196,23 @@ const CASES_KDFITER: &[Case] = &[
     },
 ];
 
+// 5.x authenticates pages with AEAD, where HMAC settings do nothing, so these switch HMAC on as 4.x has it by default.
 const CASES_HMAC_ALG: &[Case] = &[
     Case {
         slug: "hmacsha1",
-        pragmas: &["PRAGMA cipher_hmac_algorithm = HMAC_SHA1"],
+        pragmas: &[
+            "PRAGMA cipher_use_hmac = ON",
+            "PRAGMA cipher_hmac_algorithm = HMAC_SHA1",
+        ],
         check_fail_without: true,
         uses_salt: false,
     },
     Case {
         slug: "hmacsha256",
-        pragmas: &["PRAGMA cipher_hmac_algorithm = HMAC_SHA256"],
+        pragmas: &[
+            "PRAGMA cipher_use_hmac = ON",
+            "PRAGMA cipher_hmac_algorithm = HMAC_SHA256",
+        ],
         check_fail_without: true,
         uses_salt: false,
     },
@@ -233,9 +240,10 @@ const CASE_PLAINTEXT: Case = Case {
     uses_salt: true,
 };
 
+// 4.x has no cipher_aead and ignores it, while 5.x needs it off before a page can go unauthenticated.
 const CASE_NOHMAC: Case = Case {
     slug: "nohmac",
-    pragmas: &["PRAGMA cipher_use_hmac = OFF"],
+    pragmas: &["PRAGMA cipher_aead = OFF", "PRAGMA cipher_use_hmac = OFF"],
     check_fail_without: true,
     uses_salt: false,
 };
@@ -277,7 +285,7 @@ fn run_setting(util: &MemVfsUtil, case: &Case) {
     });
     {
         let db = Db::open(&native_vfs);
-        db.exec(PASS);
+        db.exec(&keyed(PASS));
         if let Some(salt) = &native_salt {
             // Double-quoted identifier delivers x'hex' as zRight to the SQLCipher handler
             db.exec(&format!("PRAGMA cipher_salt = \"x'{salt}'\""));
@@ -294,7 +302,7 @@ fn run_setting(util: &MemVfsUtil, case: &Case) {
     }
     if case.check_fail_without {
         let wrong = Db::open(&native_vfs);
-        wrong.exec(PASS);
+        wrong.exec(&keyed(PASS));
         assert!(
             !can_execute(&wrong, "SELECT count(*) FROM sqlite_schema"),
             "{native_vfs}: must be inaccessible without the setting"
@@ -306,7 +314,7 @@ fn run_setting(util: &MemVfsUtil, case: &Case) {
     let web_vfs = format!("sw-{slug}");
     let web_salt = {
         let db = Db::open(&web_vfs);
-        db.exec(PASS);
+        db.exec(&keyed(PASS));
         for &p in case.pragmas {
             db.exec(p);
         }
@@ -340,7 +348,7 @@ fn run_setting(util: &MemVfsUtil, case: &Case) {
     write_file_sync(&format!("{DIR}/web-setting-{slug}.db"), &bytes);
     {
         let db = Db::open(&web_vfs);
-        db.exec(PASS);
+        db.exec(&keyed(PASS));
         if let Some(salt) = &web_salt {
             db.exec(&format!("PRAGMA cipher_salt = \"x'{salt}'\""));
         }

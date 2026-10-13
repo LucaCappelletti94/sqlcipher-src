@@ -1,0 +1,22 @@
+---
+name: SQLCipher branches
+
+# The heads of the branches SQLCipher develops on move and carry no signature, so they warn here instead of gating pull requests.
+"on":
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  head:
+    name: SQLCipher ${{ matrix.leg }} head
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [prerelease, beta]
+    uses: ./.github/workflows/sqlcipher-leg.yml
+    with:
+      leg: ${{ matrix.leg }}
