@@ -47,7 +47,7 @@ jobs:
       - run: |
           tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -72,7 +72,7 @@ jobs:
       - run: |
           tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -100,7 +100,7 @@ jobs:
           tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
           echo "SQLITE_WASM_RS_SOURCE_DIR=$RUNNER_TEMP/leg/sources" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown
@@ -128,7 +128,7 @@ jobs:
       - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
       - run: sudo apt-get install -y --no-install-recommends tcl-dev
       # Cargo resolves the sqlite-wasm-rs revision whose wrapper the testfixture builds.
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - run: SQLCIPHER_TREE="$RUNNER_TEMP/leg/sqlcipher" SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./suite/run.sh
@@ -146,7 +146,7 @@ jobs:
       - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
       - run: sudo apt-get install -y --no-install-recommends tcl-dev
       # Cargo resolves the sqlite-wasm-rs revision whose wrapper the testfixture builds.
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - run: SQLCIPHER_TREE="$RUNNER_TEMP/leg/sqlcipher" SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./suite/run.sh
@@ -164,7 +164,7 @@ jobs:
           name: sqlcipher-${{ inputs.leg }}
           path: ${{ runner.temp }}
       - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         with:
           toolchain: stable
       - run: SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./tools/rusqlite-native.sh
