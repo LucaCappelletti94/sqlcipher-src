@@ -47,10 +47,9 @@ jobs:
       - run: |
           tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      - run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: wasm-pack
@@ -72,10 +71,9 @@ jobs:
       - run: |
           tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      - run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: wasm-pack
@@ -100,10 +98,9 @@ jobs:
           tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
           cat "$RUNNER_TEMP/leg/leg.env" >> "$GITHUB_ENV"
           echo "SQLITE_WASM_RS_SOURCE_DIR=$RUNNER_TEMP/leg/sources" >> "$GITHUB_ENV"
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
-          targets: wasm32-unknown-unknown
+      - run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: wasm-pack
@@ -128,9 +125,9 @@ jobs:
       - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
       - run: sudo apt-get install -y --no-install-recommends tcl-dev
       # Cargo resolves the sqlite-wasm-rs revision whose wrapper the testfixture builds.
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
       - run: SQLCIPHER_TREE="$RUNNER_TEMP/leg/sqlcipher" SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./suite/run.sh
 
   sanitizers:
@@ -146,9 +143,9 @@ jobs:
       - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
       - run: sudo apt-get install -y --no-install-recommends tcl-dev
       # Cargo resolves the sqlite-wasm-rs revision whose wrapper the testfixture builds.
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
       - run: SQLCIPHER_TREE="$RUNNER_TEMP/leg/sqlcipher" SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./suite/run.sh
         env:
           SANITIZE: "1"
@@ -164,7 +161,7 @@ jobs:
           name: sqlcipher-${{ inputs.leg }}
           path: ${{ runner.temp }}
       - run: tar xzf "$RUNNER_TEMP/leg.tar.gz" -C "$RUNNER_TEMP"
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
-        with:
-          toolchain: stable
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
       - run: SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./tools/rusqlite-native.sh
