@@ -4,7 +4,6 @@
 [![CodeQL](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/codeql.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/codeql.yml)
 [![ClusterFuzzLite](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/cflite_build.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/cflite_build.yml)
 [![codecov](https://codecov.io/gh/LucaCappelletti94/sqlcipher-src/graph/badge.svg?token=iyDt4aR7wE)](https://codecov.io/gh/LucaCappelletti94/sqlcipher-src)
-[![Quality gate](https://sonarcloud.io/api/project_badges/measure?project=LucaCappelletti94_sqlcipher-wasm-src&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=LucaCappelletti94_sqlcipher-wasm-src)
 [![SQLCipher release](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-release.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-release.yml)
 [![SQLCipher branches](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-branches.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-branches.yml)
 [![crates.io](https://img.shields.io/crates/v/sqlcipher-src.svg)](https://crates.io/crates/sqlcipher-src)
