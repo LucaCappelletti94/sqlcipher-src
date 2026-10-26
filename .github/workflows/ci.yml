@@ -82,7 +82,7 @@ jobs:
       - run: |
           rustup toolchain install stable --profile minimal --component clippy --target wasm32-unknown-unknown
           rustup default stable
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: wasm-pack
       - run: ./interop/run.sh
@@ -113,7 +113,7 @@ jobs:
       - run: |
           rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
           rustup default stable
-      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: wasm-pack
       # These avoid Node's fs module, and sahpool needs a browser worker for OPFS.
