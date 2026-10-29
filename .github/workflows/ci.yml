@@ -174,10 +174,3 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - run: ./tools/rusqlite-native.sh
-
-  # The signed pre-release pinned in tools/releases.sh, which nothing ships.
-  next:
-    name: SQLCipher next
-    uses: ./.github/workflows/sqlcipher-leg.yml
-    with:
-      leg: next

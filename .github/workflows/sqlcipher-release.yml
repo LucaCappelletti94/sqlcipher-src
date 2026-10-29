@@ -31,7 +31,7 @@ concurrency:
 
 jobs:
   generate:
-    # release moves the shipped sources, next moves the signed pre-release CI tests beside them.
+    # release moves the shipped sources, next moves the signed pre-release the previews workflow tests.
     name: Follow the SQLCipher ${{ matrix.line }} pin
     runs-on: ubuntu-latest
     timeout-minutes: 30

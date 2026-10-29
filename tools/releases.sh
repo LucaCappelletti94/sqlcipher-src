@@ -4,7 +4,7 @@
 SQLCIPHER_VERSION="4.19.0"
 # A signed tag moved to another commit still fails.
 SQLCIPHER_COMMIT="c4b275a47932888216bade83aff2bbc73df0ff85"
-# The newest signed pre-release tag of the next major line, which sqlcipher-release.yml moves and CI tests but nothing ships.
+# The newest signed pre-release tag of the next major line, which sqlcipher-release.yml moves and sqlcipher-previews.yml tests but nothing ships.
 # shellcheck disable=SC2034 # tools/leg.sh reads both.
 SQLCIPHER_NEXT_VERSION="5.0.0-beta"
 # shellcheck disable=SC2034
