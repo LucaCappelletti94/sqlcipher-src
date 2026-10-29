@@ -1,9 +1,9 @@
 # shellcheck shell=sh
 # Pinned upstream releases and their verified fetch, sourced with ROOT set.
 
-SQLCIPHER_VERSION="4.19.0"
+SQLCIPHER_VERSION="4.20.0"
 # A signed tag moved to another commit still fails.
-SQLCIPHER_COMMIT="c4b275a47932888216bade83aff2bbc73df0ff85"
+SQLCIPHER_COMMIT="355d4db92d3404e71faa8088d071a71d767807f4"
 # The newest signed pre-release tag of the next major line, which sqlcipher-release.yml moves and sqlcipher-previews.yml tests but nothing ships.
 # shellcheck disable=SC2034 # tools/leg.sh reads both.
 SQLCIPHER_NEXT_VERSION="5.0.0-beta.1"

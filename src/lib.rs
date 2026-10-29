@@ -3,10 +3,10 @@
 use std::path::Path;
 
 /// SQLCipher release the vendored amalgamation is generated from.
-pub const SQLCIPHER_VERSION: &str = "4.19.0";
+pub const SQLCIPHER_VERSION: &str = "4.20.0";
 
 /// SQLite release that SQLCipher release is based on.
-pub const SQLITE_VERSION: &str = "3.53.4";
+pub const SQLITE_VERSION: &str = "3.54.1";
 
 /// libtomcrypt release providing the ciphers, hashes and random generator.
 pub const LIBTOMCRYPT_VERSION: &str = "1.18.2";
