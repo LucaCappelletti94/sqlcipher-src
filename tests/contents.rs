@@ -176,25 +176,24 @@ fn only_upstream_sources_ship() {
 #[test]
 fn sqlcipher_finalizer_is_skipped_on_wasm() {
     let sqlcipher = read(SOURCE_FILE);
-    let registration = sqlcipher
-        .lines()
+    let lines: Vec<&str> = sqlcipher.lines().collect();
+    let registration = lines
+        .iter()
         .position(|l| l.contains("section(\".fini_array\")"))
-        .expect("SQLCipher no longer registers a .fini_array finalizer, so the patch is obsolete");
-    let guard = sqlcipher.lines().nth(registration - 1).unwrap();
-    assert_eq!(guard.trim(), "#elif !defined(__wasm__)");
+        .expect("SQLCipher no longer registers a .fini_array finalizer");
+    assert_eq!(lines[registration - 1], "#else");
+    // The branch of the same unindented chain before that #else must take every wasm target.
+    let branch = lines[..registration - 1]
+        .iter()
+        .rev()
+        .find(|l| l.starts_with("#elif") || l.starts_with("#if"))
+        .unwrap();
+    assert_eq!(*branch, "#elif defined(__wasm__)");
 }
 
 #[test]
-fn the_finalizer_guard_is_the_only_local_change() {
-    for name in shipped_files() {
-        let wasm = read(&name)
-            .lines()
-            .filter(|l| l.contains("__wasm__"))
-            .count();
-        let expected = usize::from(name == SOURCE_FILE);
-        assert_eq!(wasm, expected, "{name} carries a local wasm change");
-    }
-    // SQLCipher and libtomcrypt reach libtomcrypt's headers through the include path, as released.
+fn tomcrypt_headers_are_included_as_released() {
+    // SQLCipher and libtomcrypt reach libtomcrypt's headers through the include path.
     assert!(read(SOURCE_FILE).contains("\n#include <tomcrypt.h>\n"));
     assert!(read(&tomcrypt_header()).contains("\n#include <tomcrypt_cfg.h>\n"));
     for name in shipped_files().iter().filter(|n| has_extension(n, "h")) {

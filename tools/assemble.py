@@ -15,25 +15,13 @@ for name in os.listdir(out):
     else:
         os.remove(path)
 
-# wasm32 cannot hold a .fini_array section, and SQLCipher offers no switch to skip it until sqlcipher/sqlcipher#622 ships.
-FINI_BEFORE = '#else\nstatic void (*const sqlcipher_fini_func)(void) __attribute__((used, section(".fini_array"))) = sqlcipher_fini;\n#endif\n'
-FINI_AFTER = '#elif !defined(__wasm__)\nstatic void (*const sqlcipher_fini_func)(void) __attribute__((used, section(".fini_array"))) = sqlcipher_fini;\n#endif\n'
-
 
 def read(path):
     with open(path, encoding="latin-1") as f:
         return f.read()
 
 
-def write(path, text):
-    with open(path, "w", encoding="latin-1") as f:
-        f.write(text)
-
-
-amalgamation = read(os.path.join(sqlcipher, "sqlite3.c"))
-if amalgamation.count(FINI_BEFORE) != 1:
-    sys.exit("SQLCipher's .fini_array registration moved, so the wasm guard needs updating")
-write(os.path.join(out, "sqlcipher.c"), amalgamation.replace(FINI_BEFORE, FINI_AFTER))
+shutil.copy(os.path.join(sqlcipher, "sqlite3.c"), os.path.join(out, "sqlcipher.c"))
 for name in ("sqlite3.h", "sqlite3ext.h"):
     shutil.copy(os.path.join(sqlcipher, name), os.path.join(out, name))
 shutil.copy(os.path.join(sqlcipher, "LICENSE.md"), os.path.join(out, "LICENSE-sqlcipher"))
