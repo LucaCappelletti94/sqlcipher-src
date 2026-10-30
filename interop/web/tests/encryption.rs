@@ -342,7 +342,7 @@ fn memory_security_is_sticky() {
     let db = Db::open("memsec.db");
     db.exec(RAW);
 
-    // SQLCipher 4.19.0 starts with memory security off.
+    // SQLCipher starts with memory security off.
     assert_eq!(
         db.one("PRAGMA cipher_memory_security").unwrap().as_deref(),
         Some("0"),
