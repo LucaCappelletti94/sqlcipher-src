@@ -82,7 +82,7 @@ library() {
 # Runs library in the background, one job per core, since each compile takes minutes and none depends on another.
 spawn() {
     while [ "$(jobs -rp | wc -l)" -ge "$(nproc)" ]; do wait -n || true; done
-    { library "$@" || touch "$WORK/failed"; } &
+    { library "$@" || touch "$WORK/failed_$1"; } &
 }
 
 # $1 names the target source, $2 the binary, and the rest are its compiler flags.
@@ -141,7 +141,18 @@ done
 # Plain SQLite from the release amalgamation, the reference keyed_file and differential_plain compare SQLCipher against.
 spawn release plain plain.c "" -iquote ../sqlcipher
 wait
-[ ! -e "$WORK/failed" ] || { echo "a SQLCipher library failed to compile" >&2; exit 1; }
+# The release and plain libraries must compile. A beta or prerelease line that does not is an upstream defect, so it
+# leaves this build with a warning and never stops the release from being fuzzed.
+[ ! -e "$WORK/failed_release" ] || { echo "a SQLCipher release library failed to compile" >&2; exit 1; }
+built=()
+for line in "${lines[@]}"; do
+    if [ -e "$WORK/failed_$line" ]; then
+        echo "::warning::SQLCipher $line at $(cat "$SOURCES/$line/COMMIT") failed to compile, so its targets are left out"
+    else
+        built+=("$line")
+    fi
+done
+lines=("${built[@]}")
 
 # Builds every target of line $1 into binaries named with suffix $2.
 targets() {

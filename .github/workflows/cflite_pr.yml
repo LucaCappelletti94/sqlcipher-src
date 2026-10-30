@@ -35,7 +35,7 @@ jobs:
           sanitizer: ${{ matrix.sanitizer }}
 
   # Builds PR fuzzing skips, so a PR still shows they compile: MSan, which fuzzes in batch only, and the beta and
-  # prerelease lines.
+  # prerelease lines, which warn instead of failing when upstream breaks them.
   build:
     name: Build (${{ matrix.sanitizer }})
     runs-on: ubuntu-latest

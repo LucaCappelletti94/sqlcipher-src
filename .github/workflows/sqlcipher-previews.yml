@@ -1,0 +1,38 @@
+---
+name: SQLCipher previews
+
+# SQLCipher lines nothing ships. They warn here, so neither the CI badge nor the crates.io release gate waits on an upstream pre-release.
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # The signed pre-release pinned in tools/releases.sh, so a change here is tried against it before it merges.
+  next:
+    name: SQLCipher next
+    uses: ./.github/workflows/sqlcipher-leg.yml
+    with:
+      leg: next
+
+  # The heads of the branches SQLCipher develops on move and carry no signature, so only the daily run follows them.
+  head:
+    name: SQLCipher ${{ matrix.leg }} head
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [prerelease, beta]
+    uses: ./.github/workflows/sqlcipher-leg.yml
+    with:
+      leg: ${{ matrix.leg }}
