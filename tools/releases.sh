@@ -6,9 +6,9 @@ SQLCIPHER_VERSION="4.19.0"
 SQLCIPHER_COMMIT="c4b275a47932888216bade83aff2bbc73df0ff85"
 # The newest signed pre-release tag of the next major line, which sqlcipher-release.yml moves and CI tests but nothing ships.
 # shellcheck disable=SC2034 # tools/leg.sh reads both.
-SQLCIPHER_NEXT_VERSION="5.0.0-beta"
+SQLCIPHER_NEXT_VERSION="5.0.0-beta.1"
 # shellcheck disable=SC2034
-SQLCIPHER_NEXT_COMMIT="02051d3d35b1e8d084670a7566c92f037e21399e"
+SQLCIPHER_NEXT_COMMIT="65703364430f1cd90b6ce4233279ace5d429a9c8"
 # 5.x takes URI filenames, refuses direct overflow reads, and authenticates pages with AES-GCM keyed through OMAC.
 # shellcheck disable=SC2034 # tools/leg.sh writes it to leg.env, and suite/run.sh passes it to every unit.
 SQLCIPHER_LEG_FLAGS="-DSQLITE_USE_URI=1 -DSQLITE_DIRECT_OVERFLOW_READ=0 -DLTC_GCM_MODE -DLTC_OMAC"
