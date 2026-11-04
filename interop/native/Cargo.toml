@@ -8,7 +8,7 @@ publish = false
 description = "Writes and reads SQLCipher files with rusqlite's bundled SQLCipher"
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.41", features = ["bundled-sqlcipher"] }
 
 # The crate's table, minus unsafe_code (FFI) and missing_docs and cargo (never published).
 [lints.rust]
