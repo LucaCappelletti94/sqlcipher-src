@@ -36,6 +36,7 @@ struct fuzz_sqlite {
   int (*backup_step)(sqlite3_backup *, int);
   int (*backup_finish)(sqlite3_backup *);
   int (*config)(int, ...);
+  int (*file_control)(sqlite3 *, const char *, int, void *);
 };
 
 #endif

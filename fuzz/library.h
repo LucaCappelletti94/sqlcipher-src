@@ -44,4 +44,5 @@ const struct fuzz_sqlite FUZZ_LIBRARY = {
     .backup_step = sqlite3_backup_step,
     .backup_finish = sqlite3_backup_finish,
     .config = sqlite3_config,
+    .file_control = sqlite3_file_control,
 };

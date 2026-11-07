@@ -128,10 +128,20 @@ static void check_ivs(int file, const char *file_name, int page_size, int reserv
   }
 }
 
-static void check_salt(int file, const char *file_name) {
+static void check_salt(int file, const char *file_name, int page_size) {
   size_t have = 0;
   const unsigned char *bytes = memvfs_peek(file_name, &have);
   if (!bytes || have < IV_LEN) return;
+  size_t page_end = have < (size_t)page_size ? have : (size_t)page_size;
+  size_t written = IV_LEN;
+  while (written < page_end && bytes[written] == 0) written++;
+  if (written == page_end) return; /* A chunk the VFS preallocated, with page 1 never written through the codec. */
+  int zero = 1;
+  for (int b = 0; b < IV_LEN && zero; b++) zero = bytes[b] == 0;
+  if (zero) {
+    fprintf(stderr, "oracle=uniqueness file=%s reason=database salt is all zero\n", file_name);
+    abort();
+  }
   unsigned long long hash = fuzz_fnv1a(bytes, IV_LEN);
   struct file_state *st = &files_state[file];
   if (st->has_salt && st->last_salt == hash) return;
@@ -178,5 +188,5 @@ void uniqueness_check(const struct fuzz_sqlite *api, sqlite3 *db, const char *sc
   } /* chacha20's reserve padding is not modeled here, so its files get the salt check below but not the IV one. */
 
   if (reserve_sz > 0 && reserve_sz < page_size) check_ivs(file, file_name, page_size, reserve_sz, unit_len);
-  if (header == 0 && !files_state[file].explicit_salt) check_salt(file, file_name);
+  if (header == 0 && !files_state[file].explicit_salt) check_salt(file, file_name, page_size);
 }
