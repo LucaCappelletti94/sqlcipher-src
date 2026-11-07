@@ -36,4 +36,8 @@ int known_rekey_commits_transaction(int autocommit);
 /* sqlcipher#623: 5.0 advertises shared memory memvfs lacks, so after WAL every write without exclusive locking fails. */
 int known_wal_without_shm(int major);
 
+/* sqlcipher#633: a file grown on SQLITE_FCNTL_SIZE_HINT before page 1 is written gets an all-zero salt. Only the
+   prerelease line may carry the fix, so the other lines never set a chunk size. */
+int known_zero_salt_after_size_hint(const char *library);
+
 #endif

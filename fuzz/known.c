@@ -88,6 +88,10 @@ int known_wal_without_shm(int major) {
   return major >= 5; /* sqlcipher#623 */
 }
 
+int known_zero_salt_after_size_hint(const char *library) {
+  return strncmp(library, "fuzz_sqlite_prerelease_", 23) != 0; /* sqlcipher#633 */
+}
+
 /* L7: sqlcipherCodecGetKey copies a zero-length pass that its callers never free. */
 const char *__lsan_default_suppressions(void);
 const char *__lsan_default_suppressions(void) {

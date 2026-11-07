@@ -46,7 +46,8 @@ enum op {
   OP_RAW_SQL = 13,
   OP_CANARY = 14,
   OP_FAULT_TXN = 15,
-  OP_COUNT = 16,
+  OP_CHUNK_SIZE = 16,
+  OP_COUNT = 17,
 };
 
 enum step_kind { STEP_KEY, STEP_SETTING };
@@ -1043,6 +1044,13 @@ static void op_raw_sql(struct input *in) {
   if (header_mismatch(db, db_file)) close_mismatched(); /* L8 */
 }
 
+static void op_chunk_size(struct input *in) {
+  static const int sizes[] = {0, 512, 4096, 65536};
+  int chunk = sizes[u8(in) % (sizeof sizes / sizeof *sizes)];
+  if (!db || known_zero_salt_after_size_hint((parse_like ? parse_like : lib)->name)) return;
+  lib->file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
+}
+
 void script_parse_like(const struct fuzz_sqlite *api) { parse_like = api; }
 
 static void use(const struct fuzz_sqlite *api) {
@@ -1152,6 +1160,9 @@ void script_run(const struct fuzz_sqlite *api, struct input *in, enum script_mod
       break;
     case OP_FAULT_TXN:
       op_fault_txn(in);
+      break;
+    case OP_CHUNK_SIZE:
+      op_chunk_size(in);
       break;
     case OP_COUNT:
       abort();

@@ -23,7 +23,13 @@ struct mem_data {
 struct mem_file {
   sqlite3_file base;
   struct mem_data *data;
+  /* SQLITE_FCNTL_CHUNK_SIZE, kept per handle as the unix VFS keeps it. */
+  int chunk;
 };
+
+static long long round_to_chunk(const struct mem_file *handle, long long size) {
+  return handle->chunk > 0 ? (size + handle->chunk - 1) / handle->chunk * handle->chunk : size;
+}
 
 static struct mem_data files[MAX_FILES];
 
@@ -106,6 +112,7 @@ static int mem_write(sqlite3_file *file, const void *in, int amount, sqlite3_int
 
 static int mem_truncate(sqlite3_file *file, sqlite3_int64 size) {
   struct mem_data *data = ((struct mem_file *)file)->data;
+  size = round_to_chunk((struct mem_file *)file, size);
   if (size < data->size) data->size = size;
   return SQLITE_OK;
 }
@@ -134,11 +141,18 @@ static int mem_check_reserved_lock(sqlite3_file *file, int *out) {
   return SQLITE_OK;
 }
 
+/* The unix VFS's chunk handling, so a file grows on SQLITE_FCNTL_SIZE_HINT before SQLite writes its first page. */
 static int mem_file_control(sqlite3_file *file, int op, void *arg) {
-  (void)file;
-  (void)op;
-  (void)arg;
-  return SQLITE_NOTFOUND;
+  struct mem_file *handle = (struct mem_file *)file;
+  switch (op) {
+  case SQLITE_FCNTL_CHUNK_SIZE:
+    handle->chunk = *(int *)arg;
+    return SQLITE_OK;
+  case SQLITE_FCNTL_SIZE_HINT:
+    return handle->chunk > 0 ? grow(handle->data, round_to_chunk(handle, *(sqlite3_int64 *)arg)) : SQLITE_OK;
+  default:
+    return SQLITE_NOTFOUND;
+  }
 }
 
 static int mem_sector_size(sqlite3_file *file) {
@@ -185,6 +199,7 @@ static int mem_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file, int 
   }
   data->refs++;
   handle->data = data;
+  handle->chunk = 0;
   handle->base.pMethods = &mem_methods;
   if (out_flags) *out_flags = flags;
   return SQLITE_OK;
