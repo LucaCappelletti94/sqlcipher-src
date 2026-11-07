@@ -43,6 +43,12 @@ cargo run --release --manifest-path "$NATIVE/Cargo.toml" $NATIVE_FEATURES -- wri
 (cd web && SQLITE_WASM_RS_SOURCE_DIR="$SOURCE_DIR" wasm-pack test --node --release --test interop --test rusqlite --test settings)
 # shellcheck disable=SC2086 # NATIVE_FEATURES is empty or two words.
 cargo run --release --manifest-path "$NATIVE/Cargo.toml" $NATIVE_FEATURES -- read "$FIXTURES"
+# sqlcipher#633 gives a new database a random salt after the VFS grew it on SQLITE_FCNTL_SIZE_HINT. Only the prerelease
+# head may carry it, and the native side is that head only when built from the leg's sources.
+if [ -n "${NATIVE_SQLCIPHER_DIR:-}" ] && [ "${SQLCIPHER_LEG:-}" = prerelease ]; then
+    # shellcheck disable=SC2086 # NATIVE_FEATURES is empty or two words.
+    cargo run --release --manifest-path "$NATIVE/Cargo.toml" $NATIVE_FEATURES -- salt "$FIXTURES"
+fi
 # The rest exchange no files with the native side, so one run of them per source directory suffices.
 [ -z "${NATIVE_SQLCIPHER_DIR:-}" ] || exit 0
 (cd web && SQLITE_WASM_RS_SOURCE_DIR="$SOURCE_DIR" wasm-pack test --node --release \

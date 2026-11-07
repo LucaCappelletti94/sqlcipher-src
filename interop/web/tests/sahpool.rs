@@ -374,3 +374,43 @@ async fn rekey_on_sahpool() {
     util.clear().unwrap();
     unsafe { util.uninstall().unwrap() };
 }
+
+/// The first 16 bytes of the named file, which hold its salt when no plaintext header is configured.
+fn salt(util: &OpfsSAHPoolUtil, name: &str) -> [u8; 16] {
+    util.export_db(name).unwrap()[..16].try_into().unwrap()
+}
+
+#[wasm_bindgen_test]
+#[cfg_attr(
+    not(sqlcipher_size_hint_salt),
+    ignore = "needs sqlcipher#633, which this SQLCipher lacks"
+)]
+#[expect(
+    clippy::future_not_send,
+    reason = "OpfsSAHPoolUtil uses Rc and is wasm-only"
+)]
+async fn new_databases_draw_distinct_salts() {
+    const POOL: &str = "sqlcipher-sahpool-salt";
+    const VFS: &str = through(POOL);
+    let util = make_pool(POOL).await;
+
+    // sahpool grows a file on SQLITE_FCNTL_SIZE_HINT before page 1 is written, so its header reads back as zeros.
+    for name in ["salt-a.db", "salt-b.db"] {
+        let db = Db::open(VFS, name);
+        db.exec(PASS);
+        db.exec("PRAGMA journal_mode=DELETE");
+        db.exec("CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)");
+        populate(&db);
+    }
+    let a = salt(&util, "salt-a.db");
+    let b = salt(&util, "salt-b.db");
+    assert_ne!(a, [0; 16], "salt-a.db has an all-zero salt");
+    assert_ne!(b, [0; 16], "salt-b.db has an all-zero salt");
+    assert_ne!(a, b, "two new databases under one key share a salt");
+
+    util.clear().unwrap();
+    // SAFETY: each connection closed when its `Db` dropped at the end of its loop iteration, this single-threaded
+    // worker makes no other SQLite call meanwhile, and a sqlciphervfs wrapper only exists on 5.x legs, where the test
+    // is ignored.
+    unsafe { util.uninstall().unwrap() };
+}
