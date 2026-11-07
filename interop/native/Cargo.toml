@@ -2,8 +2,8 @@
 name = "interop-native"
 version = "0.0.0"
 edition = "2021"
-# hashlink, through rusqlite, needs 1.85.
-rust-version = "1.85"
+# rusqlite 0.41 needs 1.89.
+rust-version = "1.89"
 publish = false
 description = "Writes and reads SQLCipher files with rusqlite's bundled SQLCipher"
 

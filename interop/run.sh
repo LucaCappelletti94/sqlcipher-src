@@ -14,21 +14,23 @@ if [ -n "${SQLCIPHER_LEG_FLAGS:-}" ]; then
 fi
 
 # NATIVE_SQLCIPHER_DIR builds the native side from those sources in place of rusqlite's bundled SQLCipher,
-# so a leg's own defaults cross both ways.
+# so a leg's own defaults cross both ways. libsqlite3-sys compiles the sqlcipher-src release it pins exactly, so a copy
+# of that release carries the leg's sources under the version the pin accepts.
 NATIVE="$(pwd)/native"
 NATIVE_FEATURES=""
 if [ -n "${NATIVE_SQLCIPHER_DIR:-}" ]; then
     WORK=$(mktemp -d)
     trap 'rm -rf "$WORK"' EXIT
-    sys=$(cargo metadata --format-version 1 --manifest-path native/Cargo.toml |
-        jq -r '.packages[] | select(.name == "libsqlite3-sys") | .manifest_path' | xargs dirname)
-    cp -R "$sys" "$WORK/libsqlite3-sys"
-    chmod -R u+w "$WORK/libsqlite3-sys"
-    cp "$NATIVE_SQLCIPHER_DIR/sqlcipher.c" "$WORK/libsqlite3-sys/sqlcipher/sqlite3.c"
-    cp "$NATIVE_SQLCIPHER_DIR/sqlite3.h" "$NATIVE_SQLCIPHER_DIR/sqlite3ext.h" "$WORK/libsqlite3-sys/sqlcipher/"
+    src=$(cargo metadata --format-version 1 --manifest-path native/Cargo.toml |
+        jq -r '.packages[] | select(.name == "sqlcipher-src") | .manifest_path' | xargs dirname)
+    [ -f "$src/sqlcipher/sqlcipher.c" ] || { echo "the native side resolves no sqlcipher-src" >&2; exit 1; }
+    cp -R "$src" "$WORK/sqlcipher-src"
+    chmod -R u+w "$WORK/sqlcipher-src"
+    cp "$NATIVE_SQLCIPHER_DIR/sqlcipher.c" "$NATIVE_SQLCIPHER_DIR/sqlite3.h" "$NATIVE_SQLCIPHER_DIR/sqlite3ext.h" \
+        "$WORK/sqlcipher-src/sqlcipher/"
     mkdir "$WORK/native"
     cp -R native/Cargo.toml native/Cargo.lock native/src "$WORK/native/"
-    printf '\n[patch.crates-io]\nlibsqlite3-sys = { path = "%s" }\n' "$WORK/libsqlite3-sys" >> "$WORK/native/Cargo.toml"
+    printf '\n[patch.crates-io]\nsqlcipher-src = { path = "%s" }\n' "$WORK/sqlcipher-src" >> "$WORK/native/Cargo.toml"
     NATIVE="$WORK/native"
     # 5.x's OpenSSL provider needs a newer OpenSSL than ubuntu-latest carries.
     NATIVE_FEATURES="--features rusqlite/bundled-sqlcipher-vendored-openssl"
