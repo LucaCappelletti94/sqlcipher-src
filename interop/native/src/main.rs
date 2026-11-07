@@ -1,5 +1,7 @@
-//! write: creates native-*.db fixture files.  read: opens the files the browser tests wrote.
-use rusqlite::Connection;
+//! write: creates native-*.db fixture files.  read: opens the files the browser tests wrote.  salt: checks the salts of
+//! new databases the unix VFS preallocates.
+use rusqlite::{ffi, Connection};
+use std::ffi::c_int;
 
 const RAW: &str =
     "PRAGMA key = \"x'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f'\"";
@@ -372,11 +374,57 @@ fn cmd_read(dir: &str) {
     read_settings(dir);
 }
 
+/// The chunk size the unix VFS grows a file by, which allocates the header before page 1 is written.
+const CHUNK: usize = 65536;
+
+/// Asserts that two new databases under one key draw distinct, nonzero salts while the VFS preallocates in chunks.
+fn cmd_salt(dir: &str) {
+    let salts = ["native-salt-a.db", "native-salt-b.db"].map(|name| {
+        let path = format!("{dir}/{name}");
+        let _ = std::fs::remove_file(&path);
+        let db = open(&path, PASS);
+        let mut chunk = c_int::try_from(CHUNK).unwrap();
+        // SAFETY: the handle is the open connection `db` owns and outlives the call, the schema name is a NUL-terminated
+        // literal, and SQLITE_FCNTL_CHUNK_SIZE reads one c_int through the pointer, which `chunk` provides.
+        let rc = unsafe {
+            ffi::sqlite3_file_control(
+                db.handle(),
+                c"main".as_ptr(),
+                ffi::SQLITE_FCNTL_CHUNK_SIZE,
+                (&raw mut chunk).cast(),
+            )
+        };
+        assert_eq!(rc, ffi::SQLITE_OK, "{name}: SQLITE_FCNTL_CHUNK_SIZE failed");
+        db.execute_batch("CREATE TABLE t(v TEXT); INSERT INTO t VALUES ('salted');")
+            .unwrap();
+        drop(db);
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(
+            bytes.len() % CHUNK,
+            0,
+            "{name}: {} bytes, so the chunk size never applied",
+            bytes.len()
+        );
+        let salt: [u8; 16] = bytes[..16].try_into().unwrap();
+        assert_ne!(salt, [0; 16], "{name} has an all-zero salt");
+        println!(
+            "native SQLCipher gave {name} a nonzero salt in a {} byte file",
+            bytes.len()
+        );
+        salt
+    });
+    assert_ne!(
+        salts[0], salts[1],
+        "two new databases under one key share a salt"
+    );
+}
+
 fn main() {
     let dir = std::env::args().nth(2).unwrap();
     match std::env::args().nth(1).unwrap().as_str() {
         "write" => cmd_write(&dir),
         "read" => cmd_read(&dir),
+        "salt" => cmd_salt(&dir),
         _ => unreachable!(),
     }
 }
