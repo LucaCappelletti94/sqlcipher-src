@@ -1,8 +1,6 @@
 # sqlcipher-src
 
 [![CI](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/ci.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/codeql.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/codeql.yml)
-[![ClusterFuzzLite](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/cflite_build.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/cflite_build.yml)
 [![codecov](https://codecov.io/gh/LucaCappelletti94/sqlcipher-src/graph/badge.svg?token=iyDt4aR7wE)](https://codecov.io/gh/LucaCappelletti94/sqlcipher-src)
 [![SQLCipher release](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-release.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-release.yml)
 [![SQLCipher previews](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-previews.yml/badge.svg)](https://github.com/LucaCappelletti94/sqlcipher-src/actions/workflows/sqlcipher-previews.yml)
@@ -36,6 +34,6 @@ The sources are generated from signed SQLCipher and libtomcrypt releases by `upg
 
 The same checks run on SQLCipher's newest signed pre-release, and daily on the heads of its `prerelease` and `beta` branches. Nothing from those lines ships, so they report under the SQLCipher previews badge and never hold back the CI badge or a release.
 
-[ClusterFuzzLite](https://google.github.io/clusterfuzzlite/) fuzzes SQLCipher as `sqlite-wasm-rs` compiles it, under `AddressSanitizer`, `UndefinedBehaviorSanitizer` and `MemorySanitizer`, on the shipped release, SQLCipher's newest signed pre-release and its `prerelease` branch. A script target drives keys, rekeys, codec settings, VFS chunk sizes, attach, backup, export, page damage and injected I/O and allocation faults. It checks that a tampered page never reads back as valid, that no plaintext reaches a keyed file, that IVs and salts never repeat and no salt is all zero, that operations meant to keep content keep it, and that the rows match what plain SQLite and the OpenSSL provider produce. Two file-image targets hand SQLCipher hostile database files, one without the key and one with it.
+The `fuzz/` targets fuzz SQLCipher as `sqlite-wasm-rs` compiles it. A script target drives keys, rekeys, codec settings, VFS chunk sizes, attach, backup, export, page damage and injected I/O and allocation faults. It checks that a tampered page never reads back as valid, that no plaintext reaches a keyed file, that IVs and salts never repeat and no salt is all zero, that operations meant to keep content keep it, and that the rows match what plain SQLite and the OpenSSL provider produce. Two file-image targets hand SQLCipher hostile database files, one without the key and one with it.
 
 The crate is MIT, SQLCipher is BSD-3-Clause, SQLite is public domain, and libtomcrypt is public domain or WTFPL.
