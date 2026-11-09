@@ -1,5 +1,0 @@
-language: c
-sanitizers:
-  - address
-  - undefined
-  - memory
