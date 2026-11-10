@@ -50,7 +50,7 @@ jobs:
       - run: |
           rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
           rustup default stable
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: wasm-pack
       # Native is rusqlite's bundled release, so a newer major crosses with the PRAGMA cipher_compatibility of that release.
@@ -74,7 +74,7 @@ jobs:
       - run: |
           rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
           rustup default stable
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: wasm-pack
       - run: SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" NATIVE_SQLCIPHER_DIR="$RUNNER_TEMP/leg/sources" ./interop/run.sh
@@ -101,7 +101,7 @@ jobs:
       - run: |
           rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
           rustup default stable
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
+      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
         with:
           tool: wasm-pack
       - name: Chrome
