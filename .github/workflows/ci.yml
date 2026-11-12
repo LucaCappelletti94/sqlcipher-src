@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: shellcheck -x upgrade.sh bump.sh interop/run.sh suite/run.sh tools/releases.sh tools/leg.sh tools/rusqlite-native.sh fuzz/sources.sh
+      - run: shellcheck -x upgrade.sh bump.sh interop/run.sh suite/run.sh tools/releases.sh tools/leg.sh tools/rusqlite-native.sh fuzz/sources.sh fuzz/build.sh
       - name: actionlint
         run: |
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash) 1.7.12
@@ -175,3 +175,21 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - run: ./tools/rusqlite-native.sh
+
+  fuzz:
+    name: Fuzz targets build (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, memory]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get install -y --no-install-recommends tcl
+      # Cargo resolves the sqlite-wasm-rs revision whose wrapper the targets build.
+      - run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - run: fuzz/build.sh "$RUNNER_TEMP/fuzz"
+        env:
+          SANITIZER: ${{ matrix.sanitizer }}
