@@ -4,8 +4,10 @@
 set -euo pipefail
 
 mkdir -p "${1:?usage: fuzz/build.sh <output directory>}"
-OUT=$(cd "$1" && pwd)
+OUT=$(cd "$1" && pwd -P)
 cd "$(dirname "$0")"
+# The targets' outputs share names with sources here, such as codec.dict.
+[ "$OUT" != "$(pwd -P)" ] || { echo "the output directory must not be fuzz/ itself" >&2; exit 1; }
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -23,7 +25,14 @@ CXXFLAGS=${CXXFLAGS:-$CFLAGS}
 LIB_FUZZING_ENGINE=${LIB_FUZZING_ENGINE:--fsanitize=fuzzer}
 
 # Another sanitizer or line set leaves targets this build would not replace.
-rm -rf "$OUT"/codec* "$OUT"/differential* "$OUT"/hostile_file* "$OUT"/keyed_file*
+for suffix in "" _beta _prerelease; do
+    rm -rf "$OUT/differential$suffix" "$OUT/differential_plain$suffix" "$OUT/differential_plain$suffix.dict"
+    for heap in "" _system_heap; do
+        name=$suffix$heap
+        rm -rf "$OUT/codec$name" "$OUT/codec$name.dict" "$OUT/hostile_file$name" "$OUT/hostile_file${name}_seeds" \
+            "$OUT/keyed_file$name" "$OUT/keyed_file${name}_seeds"
+    done
+done
 
 SOURCES=$OUT/sources
 ./sources.sh "$SOURCES"
