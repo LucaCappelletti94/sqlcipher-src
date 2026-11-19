@@ -40,10 +40,12 @@ jobs:
       matrix:
         line: [release, next]
     steps:
-      # A manual dispatch may select another ref, and only main's tree belongs here.
+      # A manual dispatch may select another ref, and only main's tree belongs here. The full history lets
+      # release-branch.sh tell human commits on a release branch from the bot's.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Pick the version
@@ -153,37 +155,9 @@ jobs:
           COMMIT: ${{ steps.bump.outputs.commit }}
         run: |
           set -euo pipefail
-          branch="$PREFIX$VERSION"
           bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
           git config user.name "${APP_SLUG}[bot]"
           git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git checkout -b "$branch"
-          # shellcheck disable=SC2086 # PATHS is a list of paths without spaces.
-          git add $PATHS
-          git commit -m "$TITLE"
-          # An unchanged push would only rerun every check, so the branch moves only when its
-          # content changed or main moved under it.
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
-            git fetch --depth=2 origin "$branch":refs/remotes/origin/"$branch"
-            if [ "$(git rev-parse "origin/$branch^{tree}")" = "$(git rev-parse "HEAD^{tree}")" ] \
-              && [ "$(git rev-parse "origin/$branch^")" = "$(git rev-parse HEAD^)" ]; then
-              echo "$branch already holds this content on the current main"
-            else
-              git push --force-with-lease origin HEAD:refs/heads/"$branch"
-            fi
-          else
-            git push origin HEAD:refs/heads/"$branch"
-          fi
-          open=$(gh pr list --head "$branch" --state open --json number --jq length)
-          [ "$open" -gt 0 ] || gh pr create \
-            --base main --head "$branch" \
-            --title "$TITLE" \
-            --body "SQLCipher $VERSION, from https://github.com/sqlcipher/sqlcipher/releases/tag/v$VERSION, at commit $COMMIT. CI takes its sources only from a tag signed by the pinned key in keys/sqlcipher.asc that points at that commit."
-          # Every other branch of this line is superseded, whether its pull request is open or closed.
-          gh pr list --state open --json number,headRefName \
-            --jq ".[] | select(.headRefName | startswith(\"$PREFIX\")) | select(.headRefName != \"$branch\") | .number" \
-            | while read -r n; do gh pr close "$n" --comment "Superseded by SQLCipher $VERSION."; done
-          git ls-remote --heads origin "refs/heads/${PREFIX}*" | cut -f2 \
-            | { grep -vx "refs/heads/$branch" || true; } \
-            | while read -r ref; do git push origin --delete "$ref"; done
+          BODY="SQLCipher $VERSION, from https://github.com/sqlcipher/sqlcipher/releases/tag/v$VERSION, at commit $COMMIT. CI takes its sources only from a tag signed by the pinned key in keys/sqlcipher.asc that points at that commit." \
+            ./release-branch.sh
