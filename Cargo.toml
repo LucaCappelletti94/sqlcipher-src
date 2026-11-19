@@ -10,7 +10,7 @@ keywords = ["sqlite", "sqlcipher", "encryption", "amalgamation", "wasm"]
 categories = ["database", "development-tools::build-utils"]
 readme = "README.md"
 repository = "https://github.com/LucaCappelletti94/sqlcipher-src"
-include = ["/src", "/sqlcipher", "/tests", "/README.md", "/LICENSE"]
+include = ["/src", "/sqlcipher", "/tests/*.rs", "/README.md", "/LICENSE"]
 
 [lints.rust]
 missing_docs = "forbid"
